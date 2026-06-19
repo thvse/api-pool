@@ -16,10 +16,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 延迟阈值（毫秒）
-LATENCY_OK_MAX = 2000     # <2s = 可用（绿）
-LATENCY_SLOW_MAX = 5000   # 2-5s = 慢（黄），>5s = 不可用（红）
-HEALTH_CHECK_INTERVAL = 120  # 自动健康检查间隔（秒）
+LATENCY_OK_MAX = 2000     
+LATENCY_SLOW_MAX = 5000   
+HEALTH_CHECK_INTERVAL = 120  
 
 
 # ============================================================
@@ -39,7 +38,6 @@ class Endpoint:
     cooldown_minutes: int = 5
     extra_headers: dict = field(default_factory=dict)
 
-    # 运行时状态
     _fail_count: int = field(default=0, repr=False)
     _last_error: str = field(default="", repr=False)
     _last_error_ts: float = field(default=0, repr=False)
@@ -48,8 +46,7 @@ class Endpoint:
     _total_failures: int = field(default=0, repr=False)
     _cooldown_until: float = field(default=0, repr=False)
 
-    # 健康状态
-    _health: str = field(default="unknown", repr=False)  # ok / slow / bad / unknown / testing
+    _health: str = field(default="unknown", repr=False) 
     _health_latency_ms: int = field(default=-1, repr=False)
     _health_last_check: float = field(default=0, repr=False)
     _health_error: str = field(default="", repr=False)
@@ -169,17 +166,13 @@ class APIPool:
                 ep._cooldown_until = 0
             self._current_idx = 0
 
-    # ---------- 健康检测 ----------
-
     def _check_one_health(self, ep):
-        """检测单个端点健康状态，返回 (name, health, latency_ms, error)。"""
         url = ep.base_url.rstrip("/") + "/chat/completions"
         payload = {"model": ep.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 3}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", f"Bearer {ep.api_key}")
-
         t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -198,32 +191,27 @@ class APIPool:
                 err_body = e.read().decode("utf-8", errors="ignore")[:100]
             except Exception:
                 pass
-            # 429 / 401 / 403 都算 bad
             return ep.name, "bad", latency, f"HTTP {e.code}: {err_body}"
         except Exception as e:
             latency = int((time.time() - t0) * 1000)
             return ep.name, "bad", latency, str(e)[:100]
 
     def check_all_health(self):
-        """并发检测所有启用端点的健康状态。"""
         with self._lock:
             endpoints = [ep for ep in self._endpoints if ep.enabled]
             for ep in endpoints:
                 ep._health = "testing"
-
         if not endpoints:
             return []
-
         results = []
-        with ThreadPoolExecutor(max_workers=min(len(endpoints), 10)) as pool:
-            futures = {pool.submit(self._check_one_health, ep): ep for ep in endpoints}
+        with ThreadPoolExecutor(max_workers=min(len(endpoints), 10)) as pool_exec:
+            futures = {pool_exec.submit(self._check_one_health, ep): ep for ep in endpoints}
             for future in as_completed(futures):
                 try:
                     results.append(future.result())
                 except Exception as e:
                     ep = futures[future]
                     results.append((ep.name, "bad", -1, str(e)))
-
         now = time.time()
         with self._lock:
             name_map = {ep.name: ep for ep in self._endpoints}
@@ -234,13 +222,7 @@ class APIPool:
                     ep._health_latency_ms = latency
                     ep._health_last_check = now
                     ep._health_error = error
-
-        return [
-            {"name": n, "health": h, "latency_ms": l, "error": e}
-            for n, h, l, e in results
-        ]
-
-    # ---------- 冷却逻辑 ----------
+        return [{"name": n, "health": h, "latency_ms": l, "error": e} for n, h, l, e in results]
 
     def _is_in_cooldown(self, ep):
         return ep._cooldown_until > time.time()
@@ -282,6 +264,7 @@ class APIPool:
         ep._total_calls += 1
         ep._last_success_ts = time.time()
         ep._fail_count = 0
+        ep._last_error = ""
         self._clear_cooldown(ep)
         active = self._active_endpoints()
         best = self._pick_best(active)
@@ -343,6 +326,8 @@ class APIPool:
     def _try_endpoint(self, ep, payload, timeout):
         url = ep.base_url.rstrip("/") + "/chat/completions"
         data = json.dumps(payload).encode("utf-8")
+        is_stream = payload.get("stream", False)
+        
         for attempt in range(ep.max_retries):
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Content-Type", "application/json")
@@ -350,20 +335,29 @@ class APIPool:
             for k, v in ep.extra_headers.items():
                 req.add_header(k, v)
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                
+                if is_stream:
+                    def stream_generator():
+                        try:
+                            for line in resp:
+                                yield line
+                        except Exception:
+                            pass
+                        finally:
+                            resp.close()
+                    return stream_generator(), ""
+                else:
                     body = json.loads(resp.read().decode("utf-8"))
                     return body["choices"][0]["message"]["content"].strip(), ""
+                    
             except urllib.error.HTTPError as e:
                 err_body = ""
-                try:
-                    err_body = e.read().decode("utf-8", errors="ignore")[:200]
-                except Exception:
-                    pass
+                try: err_body = e.read().decode("utf-8", errors="ignore")[:200]
+                except Exception: pass
                 msg = f"HTTP {e.code}: {err_body}"
-                if e.code == 429:
-                    return None, msg + " (429 rate-limited)"
-                if e.code in (401, 403):
-                    return None, msg + " (auth error)"
+                if e.code == 429: return None, msg + " (429 rate-limited)"
+                if e.code in (401, 403): return None, msg + " (auth error)"
                 if e.code >= 500:
                     if attempt < ep.max_retries - 1:
                         time.sleep(1.5 * (attempt + 1))
@@ -380,8 +374,6 @@ class APIPool:
                 return None, f"未知错误: {e}"
         return None, "重试次数用尽"
 
-    # ---------- 获取模型列表 ----------
-
     def fetch_models(self, base_url, api_key, timeout=10):
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
@@ -392,44 +384,28 @@ class APIPool:
             models = []
             for m in raw:
                 mid = m.get("id", "")
-                if not mid:
-                    continue
+                if not mid: continue
                 info = {"id": mid}
-                if "pricing" in m:
-                    info["pricing"] = m["pricing"]
-                if "description" in m:
-                    info["description"] = m["description"][:120]
-                # 多模态：仅保留 API 元数据，不做名字猜测
-                # 前端手动检测后才填入
+                if "pricing" in m: info["pricing"] = m["pricing"]
+                if "description" in m: info["description"] = m["description"][:120]
                 info["modality"] = "unknown"
                 info["modality_source"] = "none"
                 models.append(info)
             models.sort(key=lambda x: x["id"])
             return models
 
-    # ---------- 检测视觉能力（发图片测试） ----------
-
     def test_vision(self, base_url, api_key, model, timeout=15):
-        """发一张最小测试图片，判断模型是否支持视觉输入。"""
-        # 1x1 红色 PNG (67 bytes)
         tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
         url = base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "describe this image in 3 words"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_png}"}}
-                ]
-            }],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "describe this image in 3 words"}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_png}"}}]}],
             "max_tokens": 10,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", f"Bearer {api_key}")
-
         t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -440,18 +416,13 @@ class APIPool:
         except urllib.error.HTTPError as e:
             latency = int((time.time() - t0) * 1000)
             err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="ignore")[:200]
-            except Exception:
-                pass
-            # 400 错误通常意味着模型不支持图片输入
+            try: err_body = e.read().decode("utf-8", errors="ignore")[:200]
+            except Exception: pass
             unsupported = e.code == 400 or "image" in err_body.lower() or "vision" in err_body.lower() or "content" in err_body.lower()
-            return {"ok": True, "supports_vision": not unsupported, "latency_ms": latency, "reply": "", "error": f"HTTP {e.code}: {err_body}" if unsupported else f"HTTP {e.code}: {err_body}"}
+            return {"ok": True, "supports_vision": not unsupported, "latency_ms": latency, "reply": "", "error": f"HTTP {e.code}: {err_body}"}
         except Exception as e:
             latency = int((time.time() - t0) * 1000)
             return {"ok": False, "supports_vision": False, "latency_ms": latency, "reply": "", "error": str(e)}
-
-    # ---------- 测试单个模型延迟 ----------
 
     def test_model_latency(self, base_url, api_key, model, timeout=15):
         url = base_url.rstrip("/") + "/chat/completions"
@@ -471,72 +442,41 @@ class APIPool:
         except urllib.error.HTTPError as e:
             latency = int((time.time() - t0) * 1000)
             err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="ignore")[:150]
-            except Exception:
-                pass
+            try: err_body = e.read().decode("utf-8", errors="ignore")[:150]
+            except Exception: pass
             return {"ok": False, "status": "bad", "latency_ms": latency, "reply": "", "error": f"HTTP {e.code}: {err_body}"}
         except Exception as e:
             latency = int((time.time() - t0) * 1000)
             return {"ok": False, "status": "bad", "latency_ms": latency, "reply": "", "error": str(e)}
 
-
-# ============================================================
-#  配置持久化 + 后台健康检查
-# ============================================================
-
 CONFIG_FILE = "api_config.json"
-
 
 def load_config():
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg.get("api_endpoints", [])
-    except FileNotFoundError:
-        return []
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f: return json.load(f).get("api_endpoints", [])
     except Exception:
         return []
-
 
 def save_config(endpoints_data):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump({"api_endpoints": endpoints_data}, f, ensure_ascii=False, indent=2)
 
-
 def ensure_config():
-    """首次运行时自动创建空配置文件。"""
-    if not os.path.exists(CONFIG_FILE):
-        save_config([])
-        print(f"  📄 已创建空配置文件: {CONFIG_FILE}")
-
+    if not os.path.exists(CONFIG_FILE): save_config([])
 
 ensure_config()
 
-
 def _health_check_loop():
-    """后台定时健康检查线程。"""
     while True:
         time.sleep(HEALTH_CHECK_INTERVAL)
-        try:
-            pool.check_all_health()
-        except Exception:
-            pass
-
-
-# ============================================================
-#  HTTP Server + GUI
-# ============================================================
+        try: pool.check_all_health()
+        except Exception: pass
 
 pool = APIPool(default_payload={"temperature": 0.7})
-for ep_data in load_config():
-    pool.add_endpoint(ep_data)
+for ep_data in load_config(): pool.add_endpoint(ep_data)
 
-# 启动后台健康检查
 _health_thread = threading.Thread(target=_health_check_loop, daemon=True)
 _health_thread.start()
-
-# 启动时立即做一次健康检查（后台）
 threading.Thread(target=pool.check_all_health, daemon=True).start()
 
 
@@ -544,169 +484,91 @@ def api_handler(method, path, body):
     parsed = urlparse(path)
     cp = parsed.path
 
-    if method == "GET" and cp == "/api/endpoints":
-        return 200, pool.list_endpoints()
+    # ================= 代理接口 =================
+    if method == "POST" and cp in ("/v1/chat/completions", "/chat/completions"):
+        messages = body.get("messages", [])
+        is_stream = body.get("stream", False)
+        extra_payload = {k: v for k, v in body.items() if k not in ("messages", "model")}
+        
+        try:
+            result = pool.chat(messages, extra_payload=extra_payload)
+            if is_stream: return 200, result, True 
+            
+            response = {
+                "id": f"chatcmpl-{int(time.time()*1000)}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "api-pool-aggregated",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": result}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            }
+            return 200, response, False
+            
+        except AllEndpointsFailed as e:
+            return 500, {"error": {"message": f"所有端点均已失效: {e.errors}", "type": "server_error"}}, False
+        except Exception as e:
+            return 500, {"error": {"message": str(e), "type": "server_error"}}, False
 
-    if method == "GET" and cp == "/api/chain":
-        return 200, pool.get_active_chain()
-
+    if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
+    if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
     if method == "POST" and cp == "/api/endpoints":
-        pool.add_endpoint(body)
-        _sync_to_config()
-        return 201, {"ok": True}
-
+        pool.add_endpoint(body); _sync_to_config(); return 201, {"ok": True}, False
     if method == "POST" and cp == "/api/endpoints/batch":
-        items = body.get("endpoints", [])
-        base = body.get("base", {})
-        added = 0
-        start_priority = base.get("start_priority", 1)
+        items = body.get("endpoints", []); base = body.get("base", {}); added = 0; start_priority = base.get("start_priority", 1)
         for i, item in enumerate(items):
             ep = {
-                "name": item.get("name", f"ep_{i}"),
-                "base_url": item.get("base_url", base.get("base_url", "")),
-                "api_key": item.get("api_key", base.get("api_key", "")),
-                "model": item.get("model", ""),
-                "priority": item.get("priority", start_priority + i),
-                "timeout": item.get("timeout", base.get("timeout", 15)),
-                "max_retries": item.get("max_retries", base.get("max_retries", 1)),
-                "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
+                "name": item.get("name", f"ep_{i}"), "base_url": item.get("base_url", base.get("base_url", "")),
+                "api_key": item.get("api_key", base.get("api_key", "")), "model": item.get("model", ""),
+                "priority": item.get("priority", start_priority + i), "timeout": item.get("timeout", base.get("timeout", 15)),
+                "max_retries": item.get("max_retries", base.get("max_retries", 1)), "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
                 "enabled": item.get("enabled", True),
             }
-            if ep["model"]:
-                pool.add_endpoint(ep)
-                added += 1
-        _sync_to_config()
-        return 201, {"ok": True, "added": added}
-
+            if ep["model"]: pool.add_endpoint(ep); added += 1
+        _sync_to_config(); return 201, {"ok": True, "added": added}, False
     if method == "PUT" and cp.startswith("/api/endpoints/") and not cp.endswith("/toggle"):
-        name = unquote(cp.split("/")[-1])
-        pool.update_endpoint(name, body)
-        _sync_to_config()
-        return 200, {"ok": True}
-
+        name = unquote(cp.split("/")[-1]); pool.update_endpoint(name, body); _sync_to_config(); return 200, {"ok": True}, False
     if method == "DELETE" and cp.startswith("/api/endpoints/"):
-        name = unquote(cp.split("/")[-1])
-        pool.remove_endpoint(name)
-        _sync_to_config()
-        return 200, {"ok": True}
-
+        name = unquote(cp.split("/")[-1]); pool.remove_endpoint(name); _sync_to_config(); return 200, {"ok": True}, False
     if method == "POST" and cp.endswith("/toggle"):
         name = unquote(cp.split("/")[3])
         for ep in pool.list_endpoints():
-            if ep["name"] == name:
-                pool.set_enabled(name, not ep["enabled"])
-                break
-        _sync_to_config()
-        return 200, {"ok": True}
-
-    # POST /api/health-check — 手动触发健康检测
-    if method == "POST" and cp == "/api/health-check":
-        results = pool.check_all_health()
-        return 200, {"ok": True, "results": results}
-
+            if ep["name"] == name: pool.set_enabled(name, not ep["enabled"]); break
+        _sync_to_config(); return 200, {"ok": True}, False
+    if method == "POST" and cp == "/api/health-check": return 200, {"ok": True, "results": pool.check_all_health()}, False
     if method == "POST" and cp == "/api/fetch-models":
-        base_url = body.get("base_url", "")
-        api_key = body.get("api_key", "")
-        if not base_url or not api_key:
-            return 400, {"error": "需要 base_url 和 api_key"}
+        base_url = body.get("base_url", ""); api_key = body.get("api_key", "")
+        if not base_url or not api_key: return 400, {"error": "需要 base_url 和 api_key"}, False
         try:
             models = pool.fetch_models(base_url, api_key)
-            return 200, {"ok": True, "models": models, "count": len(models)}
+            return 200, {"ok": True, "models": models, "count": len(models)}, False
         except urllib.error.HTTPError as e:
             err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="ignore")[:200]
-            except Exception:
-                pass
-            return 200, {"ok": False, "error": f"HTTP {e.code}: {err_body}"}
-        except Exception as e:
-            return 200, {"ok": False, "error": str(e)}
-
-    if method == "POST" and cp == "/api/test-model":
-        base_url = body.get("base_url", "")
-        api_key = body.get("api_key", "")
-        model = body.get("model", "")
-        if not all([base_url, api_key, model]):
-            return 400, {"error": "需要 base_url, api_key, model"}
-        return 200, pool.test_model_latency(base_url, api_key, model, timeout=body.get("timeout", 15))
-
-    # POST /api/test-vision — 检测模型是否支持视觉
-    if method == "POST" and cp == "/api/test-vision":
-        base_url = body.get("base_url", "")
-        api_key = body.get("api_key", "")
-        model = body.get("model", "")
-        if not all([base_url, api_key, model]):
-            return 400, {"error": "需要 base_url, api_key, model"}
-        return 200, pool.test_vision(base_url, api_key, model, timeout=body.get("timeout", 15))
-
+            try: err_body = e.read().decode("utf-8", errors="ignore")[:200]
+            except Exception: pass
+            return 200, {"ok": False, "error": f"HTTP {e.code}: {err_body}"}, False
+        except Exception as e: return 200, {"ok": False, "error": str(e)}, False
+    if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15)), False
+    if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15)), False
     if method == "POST" and cp == "/api/test":
-        name = body.get("name", "")
-        test_msg = body.get("message", "你好")
-        target_ep = None
+        name = body.get("name", ""); test_msg = body.get("message", "你好"); target_ep = None
         for ep in pool.list_endpoints():
-            if ep["name"] == name:
-                target_ep = ep
-                break
-        if not target_ep:
-            return 404, {"error": f"端点 {name} 不存在"}
+            if ep["name"] == name: target_ep = ep; break
+        if not target_ep: return 404, {"error": f"端点 {name} 不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
-        test_pool.add_endpoint({
-            "name": name, "base_url": target_ep["base_url"],
-            "api_key": target_ep["api_key_full"], "model": target_ep["model"],
-            "priority": 1, "timeout": target_ep["timeout"],
-            "max_retries": target_ep["max_retries"], "enabled": True,
-        })
-        try:
-            result = test_pool.chat([{"role": "user", "content": test_msg}])
-            return 200, {"ok": True, "result": result}
-        except Exception as e:
-            return 200, {"ok": False, "error": str(e)}
-
+        test_pool.add_endpoint({"name": name, "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True})
+        try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
+        except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/test-pool":
-        test_msg = body.get("message", "你好")
-        try:
-            result = pool.chat([{"role": "user", "content": test_msg}])
-            return 200, {"ok": True, "result": result}
-        except AllEndpointsFailed as e:
-            return 200, {"ok": False, "errors": e.errors}
-        except Exception as e:
-            return 200, {"ok": False, "error": str(e)}
+        try: return 200, {"ok": True, "result": pool.chat([{"role": "user", "content": body.get("message", "你好")}])}, False
+        except AllEndpointsFailed as e: return 200, {"ok": False, "errors": e.errors}, False
+        except Exception as e: return 200, {"ok": False, "error": str(e)}, False
+    if method == "POST" and cp == "/api/reset": pool.reset(); return 200, {"ok": True}, False
 
-    if method == "POST" and cp == "/api/reset":
-        pool.reset()
-        return 200, {"ok": True}
-
-    return 404, {"error": "Not found"}
-
+    return 404, {"error": "Not found"}, False
 
 def _sync_to_config():
-    eps = pool.list_endpoints()
-    save_data = [
-        {
-            "name": ep["name"], "base_url": ep["base_url"],
-            "api_key": ep["api_key_full"], "model": ep["model"],
-            "priority": ep["priority"], "timeout": ep["timeout"],
-            "max_retries": ep["max_retries"], "enabled": ep["enabled"],
-            "cooldown_minutes": ep["cooldown_minutes"],
-        }
-        for ep in eps
-    ]
-    save_config(save_data)
+    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"]} for ep in pool.list_endpoints()])
 
-
-# ============================================================
-#  GUI HTML
-# ============================================================
-
-
-# ============================================================
-#  GUI HTML
-# ============================================================
-
-
-# ============================================================
-#  GUI HTML
-# ============================================================
 
 GUI_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -725,13 +587,11 @@ GUI_HTML = r"""<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:20px 24px;font-size:14px;line-height:1.5}
 
-/* ===== Header ===== */
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
 .header h1{font-size:20px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
 .header h1 .logo{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--blue));display:flex;align-items:center;justify-content:center;font-size:16px}
 .header-actions{display:flex;gap:8px;flex-wrap:wrap}
 
-/* ===== Buttons ===== */
 .btn{padding:7px 14px;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:5px;letter-spacing:.2px}
 .btn:hover{transform:translateY(-1px);filter:brightness(1.1)}
 .btn:active{transform:translateY(0)}
@@ -744,29 +604,43 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .btn-sm{padding:4px 10px;font-size:11px;border-radius:6px}
 .btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
 
-/* ===== Layout ===== */
+.api-info-card {
+  background: rgba(124, 109, 240, 0.05); 
+  border: 1px solid var(--accent); 
+  border-radius: var(--radius); 
+  padding: 14px 18px; 
+  margin-bottom: 20px;
+  box-shadow: var(--shadow);
+}
+.api-info-card code {
+  background: var(--bg);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-light);
+  user-select: all;
+  border: 1px solid var(--border);
+}
+
 .grid{display:grid;grid-template-columns:1fr 360px;gap:20px;align-items:start}
 @media(max-width:920px){.grid{grid-template-columns:1fr}}
 
-/* ===== Cards ===== */
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow)}
 .card-title{font-size:13px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:7px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px}
 .card-title .icon{font-size:15px}
 
-/* ===== Stats ===== */
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
 .stat-item{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:8px;padding:12px 10px;text-align:center}
 .stat-item .num{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
 .stat-item .label{font-size:10px;color:var(--text-dim);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
 
-/* ===== Filter Bar ===== */
 .filter-bar{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
 .filter-btn{padding:4px 12px;border-radius:16px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-dim);transition:all .12s}
 .filter-btn:hover{border-color:var(--accent);color:var(--accent-light)}
 .filter-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
 .filter-count{font-size:11px;color:var(--text-dim);margin-left:auto}
 
-/* ===== Endpoint List ===== */
 .ep-list{display:flex;flex-direction:column;gap:6px}
 .ep-item{background:rgba(255,255,255,.015);border:1px solid var(--border);border-radius:8px;padding:12px 14px;transition:all .12s}
 .ep-item:hover{border-color:#2a3050;background:var(--card-hover)}
@@ -790,7 +664,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .ep-actions{display:flex;gap:4px;flex-wrap:wrap}
 .ep-error{margin-top:6px;font-size:11px;color:var(--red);background:var(--red-dim);padding:5px 8px;border-radius:6px;word-break:break-all}
 
-/* ===== Chain ===== */
 .chain-list{display:flex;flex-direction:column;gap:0}
 .chain-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-left:2px solid var(--border);font-size:12px;position:relative;transition:all .12s}
 .chain-item:last-child{border-left-color:transparent}
@@ -809,7 +682,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .chain-err{font-size:10px;color:var(--red);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chain-connector{height:12px;border-left:2px dashed var(--border);margin-left:0}
 
-/* ===== Modal ===== */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:1000;opacity:0;pointer-events:none;transition:opacity .15s}
 .modal-overlay.show{opacity:1;pointer-events:all}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;width:560px;max-width:94vw;max-height:88vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,.5)}
@@ -821,7 +693,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
 
-/* ===== Model Browser ===== */
 .model-row{display:flex;gap:8px;align-items:center}
 .model-row input{flex:1}
 .model-browser{margin-top:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -855,14 +726,12 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .pagination .btn{min-width:28px;justify-content:center}
 .pagination .page-info{font-size:11px;color:var(--text-dim)}
 
-/* ===== Toast ===== */
 .toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:8px;font-size:12px;font-weight:600;z-index:2000;opacity:0;transform:translateY(8px);transition:all .2s;max-width:320px;word-break:break-all}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast-success{background:var(--green);color:#000}
 .toast-error{background:var(--red);color:#fff}
 .toast-info{background:var(--accent);color:#fff}
 
-/* ===== Misc ===== */
 .empty{text-align:center;padding:32px 16px;color:var(--text-dim);font-size:13px}
 .test-input-row{display:flex;gap:6px}
 .test-input-row input{flex:1;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:12px;outline:none}
@@ -880,6 +749,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
     <button class="btn btn-green" onclick="testPool()">🧪 测试聚合池</button>
+  </div>
+</div>
+
+<div class="api-info-card">
+  <div style="font-size: 13px; font-weight: 700; color: var(--accent-light); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">🔗 客户端接入配置 (Client Config)</div>
+  <div style="display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px;">
+    <div><span style="color: var(--text-dim); margin-right: 6px;">接口地址 (Base URL):</span><code id="displayUrl">http://localhost:5100/v1</code></div>
+    <div><span style="color: var(--text-dim); margin-right: 6px;">API Key:</span><code>sk-any</code> <span style="font-size: 11px; color: var(--text-dim);">(任意填写)</span></div>
+    <div><span style="color: var(--text-dim); margin-right: 6px;">模型 (Model):</span><code>api-pool</code> <span style="font-size: 11px; color: var(--text-dim);">(任意填写)</span></div>
   </div>
 </div>
 
@@ -909,7 +787,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
   </div>
 </div>
 
-<!-- Modal -->
 <div class="modal-overlay" id="modal">
   <div class="modal">
     <h2 id="modalTitle">添加端点</h2>
@@ -946,6 +823,8 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 <div class="toast" id="toast"></div>
 
 <script>
+document.getElementById('displayUrl').textContent = window.location.protocol + '//' + window.location.host + '/v1';
+
 const API='';
 async function api(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return(await fetch(API+path,opts)).json();}
 
@@ -1045,7 +924,6 @@ function renderChain(chain){
   }).join('');
 }
 
-// ===== Actions =====
 async function runHealthCheck(){toast('正在检测...','info');const r=await api('POST','/api/health-check');if(r.ok){const o=r.results.filter(x=>x.health==='ok').length,s=r.results.filter(x=>x.health==='slow').length,b=r.results.filter(x=>x.health==='bad').length;toast(`✅${o} 🐢${s} ❌${b}`,'success');}refresh();}
 async function toggleEndpoint(n){await api('POST',`/api/endpoints/${encodeURIComponent(n)}/toggle`);refresh();}
 async function deleteEndpoint(n){if(!confirm(`删除「${n}」？`))return;await api('DELETE',`/api/endpoints/${encodeURIComponent(n)}`);toast('已删除','success');refresh();}
@@ -1054,7 +932,6 @@ async function testEndpoint(n){const m=document.getElementById('testMsg').value|
 async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
-// ===== Fetch Models =====
 function checkFetchBtn(){const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();document.getElementById('fetchModelsBtn').disabled=!(u&&k);}
 async function fetchModels(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
@@ -1160,7 +1037,6 @@ async function testSelectedVision(){
   toast(`多模态: ${vis}/${ms.length} 支持`,'success');
 }
 
-// ===== Modal =====
 function openAddModal(){
   document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
   ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
@@ -1201,7 +1077,6 @@ async function batchAddEndpoints(){
   if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
-// ===== Util =====
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function timeAgo(ts){if(!ts)return'—';const s=Math.floor(Date.now()/1000-ts);if(s<60)return s+'s前';if(s<3600)return Math.floor(s/60)+'m前';if(s<86400)return Math.floor(s/3600)+'h前';return Math.floor(s/86400)+'d前';}
 function fmtTime(s){if(s<=0)return'';if(s<60)return s+'s';const m=Math.floor(s/60);return(s%60)?`${m}m${s%60}s`:`${m}m`;}
@@ -1211,61 +1086,89 @@ refresh();setInterval(refresh,3000);
 </script>
 </body>
 </html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
     def _send_json(self, code, data):
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            pass
 
     def _send_html(self, html):
-        body = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            pass
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0))
-        if length:
-            return json.loads(self.rfile.read(length))
-        return {}
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length:
+                return json.loads(self.rfile.read(length))
+            return {}
+        except Exception:
+            return {}
 
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self._send_html(GUI_HTML)
         elif self.path.startswith("/api/"):
-            code, data = api_handler("GET", self.path, {})
-            self._send_json(code, data)
+            res = api_handler("GET", self.path, {})
+            self._send_json(res[0], res[1])
         else:
             self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
         body = self._read_body()
-        code, data = api_handler("POST", self.path, body)
-        self._send_json(code, data)
+        res = api_handler("POST", self.path, body)
+        
+        if len(res) == 3 and res[2] is True:
+            code, stream_gen = res[0], res[1]
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                
+                for chunk in stream_gen:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except ConnectionError:
+                pass
+        else:
+            self._send_json(res[0], res[1])
 
     def do_PUT(self):
         body = self._read_body()
-        code, data = api_handler("PUT", self.path, body)
-        self._send_json(code, data)
+        res = api_handler("PUT", self.path, body)
+        self._send_json(res[0], res[1])
 
     def do_DELETE(self):
-        code, data = api_handler("DELETE", self.path, {})
-        self._send_json(code, data)
+        res = api_handler("DELETE", self.path, {})
+        self._send_json(res[0], res[1])
 
 
 def main():
     port = 5100
     server = HTTPServer(("0.0.0.0", port), Handler)
     print(f"\n  ⚡ API Pool 管理面板已启动")
-    print(f"  🌐 访问: http://localhost:{port}")
+    print(f"  🌐 管理面板访问: http://localhost:{port}")
+    print(f"  🔗 客户端 Base URL: http://localhost:{port}/v1")
     print(f"  📋 已加载 {len(pool._endpoints)} 个端点")
     print(f"  🩺 健康检测: 启动时自动检测 + 每 {HEALTH_CHECK_INTERVAL}秒 复检\n")
     try:
