@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 实际配置文件（含 API Key），不提交
+api_config.json

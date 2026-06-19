@@ -1,0 +1,26 @@
+{
+  "api_endpoints": [
+    {
+      "name": "示例 - OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-your-key-here",
+      "model": "gpt-4o",
+      "priority": 1,
+      "timeout": 15,
+      "max_retries": 1,
+      "cooldown_minutes": 5,
+      "enabled": true
+    },
+    {
+      "name": "示例 - DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "sk-your-key-here",
+      "model": "deepseek-chat",
+      "priority": 2,
+      "timeout": 20,
+      "max_retries": 2,
+      "cooldown_minutes": 5,
+      "enabled": true
+    }
+  ]
+}
