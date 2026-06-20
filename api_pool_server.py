@@ -133,6 +133,18 @@ class TokenTracker:
                 trend_14d.append({"date": d_str, "tokens": raw_trend.get(d_str, 0)})
                 
             cursor.execute("""
+                SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens)
+                FROM token_usage
+                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')
+                GROUP BY h
+            """)
+            raw_hourly = dict(cursor.fetchall())
+            trend_today_hourly = []
+            for i in range(24):
+                h_str = f"{i:02d}"
+                trend_today_hourly.append({"date": f"{h_str}:00", "tokens": raw_hourly.get(h_str, 0)})
+                
+            cursor.execute("""
                 SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
                 WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')
@@ -158,6 +170,7 @@ class TokenTracker:
                 "last_30_days": last_30_days,
                 "month_cache_hit_rate": month_cache_hit_rate,
                 "trend_14d": trend_14d,
+                "trend_today_hourly": trend_today_hourly,
                 "today_endpoints": today_endpoints,
                 "month_endpoints": month_endpoints
             }
@@ -1154,8 +1167,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
     
     <div class="stats" id="tokenStatsOverview"></div>
     
-    <div class="card-title" style="margin-top:20px; font-size:11px;">近 14 天消耗趋势</div>
-    <div id="tokenTrendChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div>
+            <div class="card-title" style="margin-top:20px; font-size:11px;">今日各时段消耗趋势</div>
+            <div id="tokenTodayChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
+        </div>
+        <div>
+            <div class="card-title" style="margin-top:20px; font-size:11px;">近 14 天消耗趋势</div>
+            <div id="tokenTrendChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
+        </div>
+    </div>
     
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
         <div>
@@ -1524,6 +1545,7 @@ function drawSVGChart(containerId, data) {
 async function openStatsModal(){
     document.getElementById('statsModal').classList.add('show');
     document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载中...</div>';
+    document.getElementById('tokenTodayChart').innerHTML = '';
     document.getElementById('tokenTrendChart').innerHTML = '';
     document.getElementById('todayModelsTable').innerHTML = '';
     document.getElementById('monthModelsTable').innerHTML = '';
@@ -1543,7 +1565,10 @@ async function openStatsModal(){
         <div class="stat-item"><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
     `;
     
-    setTimeout(() => drawSVGChart('tokenTrendChart', r.trend_14d), 50);
+    setTimeout(() => {
+        drawSVGChart('tokenTodayChart', r.trend_today_hourly);
+        drawSVGChart('tokenTrendChart', r.trend_14d);
+    }, 50);
     
     const renderTbl = (data) => data && data.length ? data.map(d => `
         <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
