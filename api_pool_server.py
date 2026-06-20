@@ -999,15 +999,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 .card-title{font-size:13px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:7px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px}
 .card-title .icon{font-size:15px}
 
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
-.stat-item{position:relative;overflow:hidden;background:linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:20px;text-align:left;transition:transform .3s cubic-bezier(0.2,0.8,0.2,1),box-shadow .3s;box-shadow:0 4px 16px rgba(0,0,0,0.2)}
-.stat-item::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);opacity:0;transition:opacity .3s}
-.stat-item:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,0.3);border-color:rgba(255,255,255,0.12)}
-.stat-item:hover::before{opacity:1}
-.stat-item .stat-icon{position:absolute;right:15px;top:15px;font-size:24px;opacity:0.2;transition:opacity .3s, transform .3s}
-.stat-item:hover .stat-icon{opacity:0.4;transform:scale(1.1)}
-.stat-item .num{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;margin-bottom:4px;letter-spacing:-0.5px}
-.stat-item .label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+.stat-item{background:rgba(255,255,255,.02);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;transition:transform .2s,box-shadow .2s;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.stat-item:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.2)}
+.stat-item .num{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.stat-item .label{font-size:10px;color:var(--text-dim);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
+
+.dash-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.dash-stat{position:relative;overflow:hidden;background:linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:20px;text-align:left;transition:transform .3s cubic-bezier(0.2,0.8,0.2,1),box-shadow .3s;box-shadow:0 4px 16px rgba(0,0,0,0.2)}
+.dash-stat::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);opacity:0;transition:opacity .3s}
+.dash-stat:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,0.3);border-color:rgba(255,255,255,0.12)}
+.dash-stat:hover::before{opacity:1}
+.dash-stat .stat-icon{position:absolute;right:15px;top:15px;font-size:24px;opacity:0.2;transition:opacity .3s, transform .3s}
+.dash-stat:hover .stat-icon{opacity:0.4;transform:scale(1.1)}
+.dash-stat .num{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;margin-bottom:4px;letter-spacing:-0.5px}
+.dash-stat .label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:600}
 
 .tbl-progress-container{position:relative;width:100%;height:100%;display:flex;align-items:center}
 .tbl-progress-bar{position:absolute;left:0;top:0;bottom:0;background:rgba(94,92,230,0.15);border-radius:4px;z-index:0;transition:width 0.5s cubic-bezier(0.2,0.8,0.2,1)}
@@ -1200,7 +1206,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 </div>
 
 <div id="viewAnalytics" style="display:none; padding-bottom:40px;">
-    <div class="stats" id="tokenStatsOverview"></div>
+    <div class="dash-stats" id="tokenStatsOverview"></div>
     
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
         <div class="card">
@@ -1767,14 +1773,14 @@ async function loadAnalytics(){
     }
     
     document.getElementById('tokenStatsOverview').innerHTML = `
-        <div class="stat-item"><div class="stat-icon">⚡</div><div class="num" style="color:var(--green)">${fmtNum(r.today)}</div><div class="label">今日消耗</div></div>
-        <div class="stat-item"><div class="stat-icon">📊</div><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
-        <div class="stat-item"><div class="stat-icon">📅</div><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
-        <div class="stat-item"><div class="stat-icon">📈</div><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
-        <div class="stat-item"><div class="stat-icon">🔥</div><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
-        <div class="stat-item"><div class="stat-icon">🌍</div><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
-        <div class="stat-item"><div class="stat-icon">💾</div><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
-        <div class="stat-item"><div class="stat-icon">🧠</div><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
+        <div class="dash-stat"><div class="stat-icon">⚡</div><div class="num" style="color:var(--green)">${fmtNum(r.today)}</div><div class="label">今日消耗</div></div>
+        <div class="dash-stat"><div class="stat-icon">📊</div><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
+        <div class="dash-stat"><div class="stat-icon">📅</div><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
+        <div class="dash-stat"><div class="stat-icon">📈</div><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
+        <div class="dash-stat"><div class="stat-icon">🔥</div><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
+        <div class="dash-stat"><div class="stat-icon">🌍</div><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
+        <div class="dash-stat"><div class="stat-icon">💾</div><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
+        <div class="dash-stat"><div class="stat-icon">🧠</div><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
     `;
     
     setTimeout(() => {
