@@ -37,6 +37,15 @@
 - 多模态检测 — 实际发图片测试模型是否支持视觉输入
 - 免费模型筛选 — OpenRouter 自动识别免费模型
 
+### 📊 数据大盘 (Analytics Dashboard)
+
+- **多维追踪** — 持久化 SQLite 记录每次请求的 Prompt Tokens、Completion Tokens 和 Cache Hit。
+- **动态图表** — 使用原生 SVG 绘制的丝滑贝塞尔平滑曲线 (Spline Charts)。
+- **多指标切换** — 无缝切换查看 `Token 消耗`、`真实请求次数`、`未命中 Token 纯消耗`。
+- **组成结构透视** — 近 14 天 Token 堆叠面积图，支持单独筛选 (缓存 / 未命中 / 生成) 成分。
+- **端点排行榜** — 按 今日/本月 维度，统计各大端点及具体模型的算力开销和请求频率。
+- **独立视觉风格** — 大盘独享类 Grafana / Vercel 的现代玻璃态 (Glassmorphism) 暗黑 UI。
+
 ## 快速开始
 
 ```bash
