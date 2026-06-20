@@ -18,6 +18,7 @@ from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 from datetime import datetime, timedelta
+from collections import deque
 
 LATENCY_OK_MAX = 2000     
 LATENCY_SLOW_MAX = 5000   
@@ -67,18 +68,31 @@ class TokenTracker:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON token_usage(timestamp)")
+            try:
+                conn.execute("ALTER TABLE token_usage ADD COLUMN endpoint_name TEXT DEFAULT ''")
+            except Exception:
+                pass
 
-    def add_usage(self, model, prompt_tokens, completion_tokens, total_tokens):
+    def add_usage(self, endpoint_name, model, prompt_tokens, completion_tokens, total_tokens):
         def _do_insert():
             try:
                 with sqlite3.connect(self.db_path, timeout=5) as conn:
                     conn.execute(
-                        "INSERT INTO token_usage (model, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?)",
-                        (model, prompt_tokens, completion_tokens, total_tokens)
+                        "INSERT INTO token_usage (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)",
+                        (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens)
                     )
             except Exception as e:
                 sys_log(f"记录 token 消耗失败: {e}", "WARN")
         threading.Thread(target=_do_insert, daemon=True).start()
+
+    def get_today_usage_by_endpoint(self, endpoint_name):
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE endpoint_name = ? AND timestamp >= date('now', 'localtime')", (endpoint_name,))
+                return cursor.fetchone()[0] or 0
+        except Exception:
+            return 0
 
     def get_stats(self):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
@@ -145,15 +159,23 @@ class Endpoint:
     max_retries: int = 1
     enabled: bool = True
     cooldown_minutes: int = 5
+    daily_limit: int = 0
+    rpm_limit: int = 0
+    use_proxy: bool = True
     extra_headers: dict = field(default_factory=dict)
 
     _fail_count: int = field(default=0, repr=False)
+    _req_timestamps: deque = field(default_factory=deque, repr=False)
+    _rpm_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _last_error: str = field(default="", repr=False)
     _last_error_ts: float = field(default=0, repr=False)
     _last_success_ts: float = field(default=0, repr=False)
     _total_calls: int = field(default=0, repr=False)
     _total_failures: int = field(default=0, repr=False)
     _cooldown_until: float = field(default=0, repr=False)
+    
+    _today_used: int = field(default=0, repr=False)
+    _today_date: str = field(default="", repr=False)
 
     _health: str = field(default="unknown", repr=False) 
     _health_latency_ms: int = field(default=-1, repr=False)
@@ -184,6 +206,8 @@ class APIPool:
     def add_endpoint(self, ep):
         if isinstance(ep, dict):
             ep = Endpoint(**{k: v for k, v in ep.items() if k in Endpoint.__dataclass_fields__})
+        ep._today_date = datetime.now().strftime("%Y-%m-%d")
+        ep._today_used = token_tracker.get_today_usage_by_endpoint(ep.name)
         with self._lock:
             self._endpoints.append(ep)
             self._endpoints.sort(key=lambda e: e.priority)
@@ -230,6 +254,11 @@ class APIPool:
             "max_retries": ep.max_retries,
             "enabled": ep.enabled,
             "cooldown_minutes": ep.cooldown_minutes,
+            "daily_limit": ep.daily_limit,
+            "today_used": ep._today_used,
+            "rpm_limit": ep.rpm_limit,
+            "use_proxy": ep.use_proxy,
+            "is_rpm_limited": self._is_rpm_limited(ep),
             "fail_count": ep._fail_count,
             "last_error": ep._last_error,
             "last_success": ep._last_success_ts,
@@ -259,6 +288,11 @@ class APIPool:
                     "fail_count": ep._fail_count,
                     "in_cooldown": ep._cooldown_until > now,
                     "cooldown_remaining": max(0, int(ep._cooldown_until - now)),
+                    "daily_limit": ep.daily_limit,
+                    "today_used": ep._today_used,
+                    "rpm_limit": ep.rpm_limit,
+                    "use_proxy": ep.use_proxy,
+                    "is_rpm_limited": self._is_rpm_limited(ep),
                     "health": ep._health,
                     "health_latency_ms": ep._health_latency_ms,
                     "health_error": ep._health_error,
@@ -273,6 +307,8 @@ class APIPool:
                 ep._last_error = ""
                 ep._last_error_ts = 0
                 ep._cooldown_until = 0
+                with ep._rpm_lock:
+                    ep._req_timestamps.clear()
             self._current_idx = 0
 
     def _check_one_health(self, ep):
@@ -284,7 +320,12 @@ class APIPool:
         req.add_header("Authorization", f"Bearer {ep.api_key}")
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            if not ep.use_proxy:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=10)
+            else:
+                resp = urllib.request.urlopen(req, timeout=10)
+            with resp:
                 resp.read()
                 latency = int((time.time() - t0) * 1000)
                 if latency <= LATENCY_OK_MAX:
@@ -337,6 +378,22 @@ class APIPool:
     def _is_in_cooldown(self, ep):
         return ep._cooldown_until > time.time()
 
+    def _is_quota_exceeded(self, ep):
+        if ep.daily_limit <= 0: return False
+        now_date = datetime.now().strftime("%Y-%m-%d")
+        if ep._today_date != now_date:
+            ep._today_date = now_date
+            ep._today_used = 0
+        return ep._today_used >= ep.daily_limit
+
+    def _is_rpm_limited(self, ep):
+        if ep.rpm_limit <= 0: return False
+        now = time.time()
+        with ep._rpm_lock:
+            while ep._req_timestamps and ep._req_timestamps[0] < now - 60:
+                ep._req_timestamps.popleft()
+            return len(ep._req_timestamps) >= ep.rpm_limit
+
     def _set_cooldown(self, ep):
         if ep.cooldown_minutes > 0:
             ep._cooldown_until = time.time() + ep.cooldown_minutes * 60
@@ -345,10 +402,10 @@ class APIPool:
         ep._cooldown_until = 0
 
     def _active_endpoints(self):
-        available = [ep for ep in self._endpoints if ep.enabled and not self._is_in_cooldown(ep)]
+        available = [ep for ep in self._endpoints if ep.enabled and not self._is_in_cooldown(ep) and not self._is_quota_exceeded(ep) and not self._is_rpm_limited(ep)]
         if available:
             return available
-        return [ep for ep in self._endpoints if ep.enabled]
+        return [ep for ep in self._endpoints if ep.enabled and not self._is_quota_exceeded(ep)]
 
     def _pick_best(self, active):
         for ep in active:
@@ -446,14 +503,22 @@ class APIPool:
         data = json.dumps(payload).encode("utf-8")
         is_stream = payload.get("stream", False)
         
-        for attempt in range(ep.max_retries):
+        for attempt in range(ep.max_retries + 1):
+            if ep.rpm_limit > 0:
+                with ep._rpm_lock:
+                    ep._req_timestamps.append(time.time())
+                    
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Content-Type", "application/json")
             req.add_header("Authorization", f"Bearer {ep.api_key}")
             for k, v in ep.extra_headers.items():
                 req.add_header(k, v)
             try:
-                resp = urllib.request.urlopen(req, timeout=timeout)
+                if not ep.use_proxy:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    resp = opener.open(req, timeout=timeout)
+                else:
+                    resp = urllib.request.urlopen(req, timeout=timeout)
                 
                 if is_stream:
                     def stream_generator():
@@ -464,7 +529,9 @@ class APIPool:
                                         chunk = json.loads(line[6:].decode("utf-8"))
                                         if "usage" in chunk and chunk["usage"]:
                                             u = chunk["usage"]
-                                            token_tracker.add_usage(ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), u.get("total_tokens", 0))
+                                            tot = u.get("total_tokens", 0)
+                                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
+                                            ep._today_used += tot
                                     except Exception:
                                         pass
                                 yield line
@@ -477,7 +544,9 @@ class APIPool:
                     body = json.loads(resp.read().decode("utf-8"))
                     u = body.get("usage", {})
                     if u:
-                        token_tracker.add_usage(ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), u.get("total_tokens", 0))
+                        tot = u.get("total_tokens", 0)
+                        token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
+                        ep._today_used += tot
                     return body["choices"][0]["message"]["content"].strip(), ""
                     
             except urllib.error.HTTPError as e:
@@ -488,14 +557,14 @@ class APIPool:
                 if e.code == 429: return None, msg + " (429 rate-limited)"
                 if e.code in (401, 403): return None, msg + " (auth error)"
                 if e.code >= 500:
-                    if attempt < ep.max_retries - 1:
+                    if attempt < ep.max_retries:
                         time.sleep(1.5 * (attempt + 1))
                         continue
                     return None, msg
                 return None, msg
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 msg = f"连接/超时错误: {e}"
-                if attempt < ep.max_retries - 1:
+                if attempt < ep.max_retries:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 return None, msg
@@ -503,11 +572,18 @@ class APIPool:
                 return None, f"未知错误: {e}"
         return None, "重试次数用尽"
 
-    def fetch_models(self, base_url, api_key, timeout=10):
+    def fetch_models(self, base_url, api_key, timeout=10, use_proxy=True):
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Authorization", f"Bearer {api_key}")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        
+        if not use_proxy:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            resp = opener.open(req, timeout=timeout)
+        else:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            
+        with resp:
             data = json.loads(resp.read().decode("utf-8"))
             raw = data.get("data", [])
             models = []
@@ -523,7 +599,7 @@ class APIPool:
             models.sort(key=lambda x: x["id"])
             return models
 
-    def test_vision(self, base_url, api_key, model, timeout=15):
+    def test_vision(self, base_url, api_key, model, timeout=15, use_proxy=True):
         tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
         url = base_url.rstrip("/") + "/chat/completions"
         payload = {
@@ -537,7 +613,13 @@ class APIPool:
         req.add_header("Authorization", f"Bearer {api_key}")
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not use_proxy:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=timeout)
+            else:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                
+            with resp:
                 body = json.loads(resp.read().decode("utf-8"))
                 latency = int((time.time() - t0) * 1000)
                 reply = body["choices"][0]["message"]["content"].strip()
@@ -553,7 +635,7 @@ class APIPool:
             latency = int((time.time() - t0) * 1000)
             return {"ok": False, "supports_vision": False, "latency_ms": latency, "reply": "", "error": str(e)}
 
-    def test_model_latency(self, base_url, api_key, model, timeout=15):
+    def test_model_latency(self, base_url, api_key, model, timeout=15, use_proxy=True):
         url = base_url.rstrip("/") + "/chat/completions"
         payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
         data = json.dumps(payload).encode("utf-8")
@@ -562,7 +644,13 @@ class APIPool:
         req.add_header("Authorization", f"Bearer {api_key}")
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not use_proxy:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=timeout)
+            else:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                
+            with resp:
                 body = json.loads(resp.read().decode("utf-8"))
                 latency = int((time.time() - t0) * 1000)
                 reply = body["choices"][0]["message"]["content"].strip()
@@ -664,6 +752,8 @@ def api_handler(method, path, body):
                 "api_key": item.get("api_key", base.get("api_key", "")), "model": item.get("model", ""),
                 "priority": item.get("priority", start_priority + i), "timeout": item.get("timeout", base.get("timeout", 15)),
                 "max_retries": item.get("max_retries", base.get("max_retries", 1)), "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
+                "daily_limit": item.get("daily_limit", base.get("daily_limit", 0)), "rpm_limit": item.get("rpm_limit", base.get("rpm_limit", 0)),
+                "use_proxy": item.get("use_proxy", base.get("use_proxy", True)),
                 "enabled": item.get("enabled", True),
             }
             if ep["model"]: pool.add_endpoint(ep); added += 1
@@ -682,7 +772,7 @@ def api_handler(method, path, body):
         base_url = body.get("base_url", ""); api_key = body.get("api_key", "")
         if not base_url or not api_key: return 400, {"error": "需要 base_url 和 api_key"}, False
         try:
-            models = pool.fetch_models(base_url, api_key)
+            models = pool.fetch_models(base_url, api_key, use_proxy=body.get("use_proxy", True))
             return 200, {"ok": True, "models": models, "count": len(models)}, False
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -690,8 +780,8 @@ def api_handler(method, path, body):
             except Exception: pass
             return 200, {"ok": False, "error": f"HTTP {e.code}: {err_body}"}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
-    if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15)), False
-    if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15)), False
+    if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True)), False
+    if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True)), False
     if method == "POST" and cp == "/api/test":
         name = body.get("name", ""); test_msg = body.get("message", "你好"); target_ep = None
         for ep in pool.list_endpoints():
@@ -710,7 +800,7 @@ def api_handler(method, path, body):
     return 404, {"error": "Not found"}, False
 
 def _sync_to_config():
-    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"]} for ep in pool.list_endpoints()])
+    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"], "daily_limit": ep.get("daily_limit", 0), "rpm_limit": ep.get("rpm_limit", 0), "use_proxy": ep.get("use_proxy", True)} for ep in pool.list_endpoints()])
 
 
 GUI_HTML = r"""<!DOCTYPE html>
@@ -963,10 +1053,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
       <div class="form-group"><label>超时 (秒)</label><input type="number" id="fTimeout" value="15" min="1"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label>重试次数</label><input type="number" id="fRetries" value="1" min="0"></div>
+      <div class="form-group"><label>重试次数</label><input type="number" id="fRetries" value="0" min="0"></div>
       <div class="form-group"><label>冷却 (分钟)</label><input type="number" id="fCooldown" value="5" min="0"></div>
     </div>
-    <div class="form-group"><label>启用</label><select id="fEnabled"><option value="true">是</option><option value="false">否</option></select></div>
+    <div class="form-row">
+      <div class="form-group"><label>启用</label><select id="fEnabled"><option value="true">是</option><option value="false">否</option></select></div>
+      <div class="form-group"><label title="达到额度后挂起，0为不限制">每日额度 (0不限)</label><input type="number" id="fDailyLimit" value="0" min="0"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label title="每分钟最高请求次数，超限自动切换，0为不限制">并发限速 (RPM，0不限)</label><input type="number" id="fRpmLimit" value="0" min="0"></div>
+      <div class="form-group"><label title="是否使用系统代理 (如v2ray)。本地或直连接口请选择否。">代理设置</label><select id="fProxy"><option value="true">随系统</option><option value="false">强制直连</option></select></div>
+    </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
       <button class="btn btn-green" id="batchAddBtn" style="display:none" onclick="batchAddEndpoints()">📦 批量添加</button>
@@ -1067,10 +1164,17 @@ function renderEndpoints(eps){
     if(ep.is_current)cls+=' current';
     if(ep.in_cooldown)cls+=' in-cooldown';
     if(ep.last_error&&!ep.in_cooldown)cls+=' has-error';
+    if(ep.daily_limit>0&&ep.today_used>=ep.daily_limit)cls+=' in-cooldown';
+    if(ep.is_rpm_limited)cls+=' in-cooldown';
     let b=`<span class="badge badge-priority">#${ep.priority}</span>${hBadge(ep.health,ep.health_latency_ms)}`;
     if(ep.is_current)b+='<span class="badge badge-current">● 当前</span>';
     if(!ep.enabled)b+='<span class="badge badge-disabled">禁用</span>';
-    if(ep.in_cooldown)b+=`<span class="badge badge-cooldown">⏳${fmtTime(ep.cooldown_remaining)}</span>`;
+    if(ep.is_rpm_limited)b+=`<span class="badge badge-cooldown" title="每分钟并发已满，限流降级中">🚧限流中</span>`;
+    else if(ep.daily_limit>0&&ep.today_used>=ep.daily_limit)b+=`<span class="badge badge-cooldown" title="今日额度已满，挂起至明日">🛑额度耗尽</span>`;
+    else if(ep.in_cooldown)b+=`<span class="badge badge-cooldown">⏳${fmtTime(ep.cooldown_remaining)}</span>`;
+    if(!ep.use_proxy)b+=`<span class="badge badge-priority" title="绕过系统全局代理，强制直连">🌐直连</span>`;
+    if(ep.daily_limit>0)b+=`<span class="badge" style="background:rgba(255,255,255,.05);color:var(--text-dim)" title="每日消耗进度">📊${fmtNum(ep.today_used)} / ${fmtNum(ep.daily_limit)}</span>`;
+    if(ep.rpm_limit>0)b+=`<span class="badge" style="background:rgba(255,255,255,.05);color:var(--text-dim)" title="每分钟最高并发请求限制">🚀${ep.rpm_limit} RPM</span>`;
     const last=ep.last_success?timeAgo(ep.last_success):'—';
     return`<div class="${cls}">
       <div class="ep-header">
@@ -1125,9 +1229,10 @@ async function resetPool(){await api('POST','/api/reset');toast('已重置','suc
 function checkFetchBtn(){const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();document.getElementById('fetchModelsBtn').disabled=!(u&&k);}
 async function fetchModels(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
+  const up=document.getElementById('fProxy').value==='true';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   const b=document.getElementById('fetchModelsBtn');b.disabled=true;b.innerHTML='⏳';
-  try{const r=await api('POST','/api/fetch-models',{base_url:u,api_key:k});
+  try{const r=await api('POST','/api/fetch-models',{base_url:u,api_key:k,use_proxy:up});
     if(r.ok&&r.models?.length){allModels=r.models;selectedModels=new Set();latencyResults={};visionResults={};modelPage=1;renderModelBrowser();toast(`${r.count} 个模型`,'success');}
     else{document.getElementById('modelBrowser').innerHTML=`<div style="padding:10px;color:var(--red);font-size:12px">❌ ${esc(r.error||'无模型')}</div>`;document.getElementById('modelBrowser').style.display='block';}
   }catch(e){toast('请求失败','error');}
@@ -1210,27 +1315,29 @@ function updateBatchBar(){
 
 async function testSelectedLatency(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
+  const up=document.getElementById('fProxy').value==='true';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('勾选模型','error');return;}
   const ms=[...selectedModels];toast(`测试 ${ms.length} 个...`,'info');
-  for(const mid of ms){latencyResults[mid]={status:'bad',latency_ms:0};filterModels();try{latencyResults[mid]=await api('POST','/api/test-model',{base_url:u,api_key:k,model:mid});}catch(e){latencyResults[mid]={status:'bad',latency_ms:0};}filterModels();}
+  for(const mid of ms){latencyResults[mid]={status:'bad',latency_ms:0};filterModels();try{latencyResults[mid]=await api('POST','/api/test-model',{base_url:u,api_key:k,model:mid,use_proxy:up});}catch(e){latencyResults[mid]={status:'bad',latency_ms:0};}filterModels();}
   toast(`✅${Object.values(latencyResults).filter(r=>r.ok).length}/${ms.length}`,'success');
 }
 
 async function testSelectedVision(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
+  const up=document.getElementById('fProxy').value==='true';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('勾选模型','error');return;}
   const ms=[...selectedModels];toast(`检测 ${ms.length} 个多模态...`,'info');
   let vis=0;
-  for(const mid of ms){visionResults[mid]={supports_vision:false};filterModels();try{const r=await api('POST','/api/test-vision',{base_url:u,api_key:k,model:mid});visionResults[mid]=r;if(r.supports_vision)vis++;}catch(e){visionResults[mid]={supports_vision:false};}filterModels();}
+  for(const mid of ms){visionResults[mid]={supports_vision:false};filterModels();try{const r=await api('POST','/api/test-vision',{base_url:u,api_key:k,model:mid,use_proxy:up});visionResults[mid]=r;if(r.supports_vision)vis++;}catch(e){visionResults[mid]={supports_vision:false};}filterModels();}
   toast(`多模态: ${vis}/${ms.length} 支持`,'success');
 }
 
 function openAddModal(){
   document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
   ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=1;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';
+  document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';
   document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
   document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
   allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
@@ -1240,7 +1347,7 @@ function editEndpoint(name){
   api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.name===name);if(!ep)return;
     document.getElementById('editName').value=name;document.getElementById('modalTitle').textContent='编辑端点';
     document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
-    document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);
+    document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);
     document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
     allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
   });
@@ -1249,7 +1356,7 @@ function closeModal(){document.getElementById('modal').classList.remove('show');
 
 async function saveEndpoint(){
   const en=document.getElementById('editName').value;
-  const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||1,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true'};
+  const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true'};
   if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
   if(!d.model){toast('选择模型','error');return;}
   if(en){await api('PUT',`/api/endpoints/${encodeURIComponent(en)}`,d);toast('已更新','success');}
@@ -1260,11 +1367,11 @@ async function saveEndpoint(){
 async function batchAddEndpoints(){
   const fn=document.getElementById('fName').value.trim();
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||1,cd=parseInt(document.getElementById('fCooldown').value)||5;
+  const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||0,cd=parseInt(document.getElementById('fCooldown').value)||5,dl=parseInt(document.getElementById('fDailyLimit').value)||0,rl=parseInt(document.getElementById('fRpmLimit').value)||0,up=document.getElementById('fProxy').value==='true';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('选择模型','error');return;}
   const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
-  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,start_priority:sp}});
+  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,start_priority:sp}});
   if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
@@ -1499,6 +1606,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    import sys
+    if sys.stdout.encoding.lower() != 'utf-8':
+        try: sys.stdout.reconfigure(encoding='utf-8')
+        except: pass
     port = 5100
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"\n  ⚡ API Pool 管理面板已启动")

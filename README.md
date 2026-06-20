@@ -12,6 +12,8 @@
 
 - **多端点聚合** — 配置多个 API 端点，按优先级自动调度
 - **故障自动切换** — 429 / 超时 / 连接断 / 5xx 等错误自动切到下一个端点
+- **并发与额度限流** — 支持每分钟最高并发 (RPM) 限制及每日最高调用额度控制
+- **代理精准隔离** — 支持单节点配置“强制直连”或“随系统代理”，无惧 v2ray 等全局代理污染
 - **冷却恢复** — 端点失败后进入冷却期，到期自动切回高优先级端点
 - **健康检测** — 启动时自动检测 + 每 2 分钟定时复检 + 手动触发
 - **并发检测** — 使用线程池并发测试所有端点，不阻塞
@@ -87,8 +89,11 @@ cp api_config.example.json api_config.json
       "model": "deepseek-chat",
       "priority": 2,
       "timeout": 20,
-      "max_retries": 2,
+      "max_retries": 0,
       "cooldown_minutes": 5,
+      "daily_limit": 1000,
+      "rpm_limit": 60,
+      "use_proxy": false,
       "enabled": true
     }
   ]
@@ -105,8 +110,11 @@ cp api_config.example.json api_config.json
 | `model` | string | — | 模型名称 |
 | `priority` | int | 999 | 优先级，数字越小越优先 |
 | `timeout` | int | 15 | 请求超时（秒） |
-| `max_retries` | int | 1 | 非 429 错误的重试次数 |
+| `max_retries` | int | 0 | 非 429 错误的重试次数（建议为 0 以实现秒切） |
 | `cooldown_minutes` | int | 5 | 失败后冷却时间（分钟），0 = 不冷却 |
+| `daily_limit` | int | 0 | 每日最高调用次数，超限则该端点当日挂起，0 = 不限 |
+| `rpm_limit` | int | 0 | 每分钟并发请求数上限，超限自动切换下一个，0 = 不限 |
+| `use_proxy` | bool | true | 是否使用系统代理。如果节点为本地或直连，设为 `false` 可绕过全局代理 |
 | `enabled` | bool | true | 是否启用 |
 
 ## API 接口
@@ -133,6 +141,7 @@ cp api_config.example.json api_config.json
 ```
 请求 → 优先级 1 端点
          │
+         ├─ 触发额度/并发超限 → 切换到优先级 2
          ├─ 成功 → 返回结果，重置状态
          │
          └─ 429 / 超时 / 5xx / 连接断
