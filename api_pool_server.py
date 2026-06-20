@@ -591,8 +591,9 @@ class APIPool:
                                             has_usage = True
                                         elif ctype == "message_start" and "message" in chunk and "usage" in chunk["message"]:
                                             u = chunk["message"]["usage"]
-                                            final_prompt_tokens += u.get("input_tokens", 0)
-                                            final_total_tokens += u.get("input_tokens", 0)
+                                            prompt_t = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                                            final_prompt_tokens += prompt_t
+                                            final_total_tokens += prompt_t
                                             final_cached_tokens += u.get("cache_read_input_tokens", 0)
                                             has_usage = True
                                     except Exception:
@@ -628,9 +629,10 @@ class APIPool:
                             if c.get("type") == "text": reply += c.get("text", "")
                         u = body.get("usage", {})
                         if u:
-                            tot = u.get("input_tokens", 0) + u.get("output_tokens", 0)
+                            prompt_t = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                            tot = prompt_t + u.get("output_tokens", 0)
                             cached = u.get("cache_read_input_tokens", 0)
-                            token_tracker.add_usage(ep.name, ep.model, u.get("input_tokens", 0), u.get("output_tokens", 0), tot, cached)
+                            token_tracker.add_usage(ep.name, ep.model, prompt_t, u.get("output_tokens", 0), tot, cached)
                             ep._today_used += tot
                         return reply.strip(), ""
                     else:
