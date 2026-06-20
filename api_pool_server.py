@@ -98,10 +98,19 @@ class TokenTracker:
         except Exception:
             return 0
 
-    def get_stats(self):
+    def get_stats(self, endpoint_filter=None):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')")
+            ep_cond = " AND endpoint_name = ?" if endpoint_filter and endpoint_filter != "all" else ""
+            params = (endpoint_filter,) if endpoint_cond_active() else ()
+            def execute_q(q):
+                cursor.execute(q, params)
+                return cursor
+
+            def endpoint_cond_active():
+                return endpoint_filter and endpoint_filter != "all"
+            
+            cursor.execute(f"SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}", params)
             today_row = cursor.fetchone()
             today = today_row[0] or 0
             today_cached = today_row[1] or 0
@@ -109,11 +118,11 @@ class TokenTracker:
             today_calls = today_row[3] or 0
             today_cache_hit_rate = round(today_cached / today_prompt * 100, 1) if today_prompt > 0 else 0
             
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-2 days', 'localtime'), 'utc')")
+            cursor.execute(f"SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-2 days', 'localtime'), 'utc'){ep_cond}", params)
             last_3_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-6 days', 'localtime'), 'utc')")
+            cursor.execute(f"SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-6 days', 'localtime'), 'utc'){ep_cond}", params)
             last_7_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', '-29 days', 'localtime'), 'utc')")
+            cursor.execute(f"SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', '-29 days', 'localtime'), 'utc'){ep_cond}", params)
             month_row = cursor.fetchone()
             last_30_days = month_row[0] or 0
             month_cached = month_row[1] or 0
@@ -121,48 +130,52 @@ class TokenTracker:
             month_calls = month_row[3] or 0
             month_cache_hit_rate = round(month_cached / month_prompt * 100, 1) if month_prompt > 0 else 0
             
-            cursor.execute("""
-                SELECT date(timestamp, 'localtime') as d, SUM(total_tokens)
+            cursor.execute(f"""
+                SELECT date(timestamp, 'localtime') as d, SUM(total_tokens), SUM(prompt_tokens), SUM(cached_tokens), SUM(completion_tokens)
                 FROM token_usage
-                WHERE timestamp >= datetime(date('now', '-13 days', 'localtime'), 'utc')
+                WHERE timestamp >= datetime(date('now', '-13 days', 'localtime'), 'utc'){ep_cond}
                 GROUP BY d
-            """)
-            raw_trend = dict(cursor.fetchall())
+            """, params)
+            raw_trend = {r[0]: {"total": r[1] or 0, "prompt": r[2] or 0, "cached": r[3] or 0, "completion": r[4] or 0} for r in cursor.fetchall()}
             trend_14d = []
             now = datetime.now()
             for i in range(13, -1, -1):
                 d_str = (now - timedelta(days=i)).strftime('%Y-%m-%d')
-                trend_14d.append({"date": d_str, "tokens": raw_trend.get(d_str, 0)})
+                data = raw_trend.get(d_str, {"total": 0, "prompt": 0, "cached": 0, "completion": 0})
+                trend_14d.append({"date": d_str, "tokens": data["total"], "prompt": data["prompt"], "cached": data["cached"], "completion": data["completion"]})
                 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens)
                 FROM token_usage
-                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')
+                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY h
-            """)
+            """, params)
             raw_hourly = dict(cursor.fetchall())
             trend_today_hourly = []
             for i in range(24):
                 h_str = f"{i:02d}"
                 trend_today_hourly.append({"date": f"{h_str}:00", "tokens": raw_hourly.get(h_str, 0)})
                 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
-                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')
+                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
-            """)
+            """, params)
             today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
             
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
-                WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime')
+                WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
-            """)
+            """, params)
             month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
+
+            cursor.execute("SELECT DISTINCT endpoint_name FROM token_usage WHERE endpoint_name IS NOT NULL")
+            all_endpoints_list = [r[0] for r in cursor.fetchall()]
 
             return {
                 "today": today,
@@ -176,8 +189,22 @@ class TokenTracker:
                 "trend_14d": trend_14d,
                 "trend_today_hourly": trend_today_hourly,
                 "today_endpoints": today_endpoints,
-                "month_endpoints": month_endpoints
+                "month_endpoints": month_endpoints,
+                "all_endpoints_list": all_endpoints_list
             }
+
+    def export_csv(self):
+        import csv
+        import io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Timestamp", "Endpoint", "Model", "Prompt Tokens", "Completion Tokens", "Total Tokens", "Cached Tokens"])
+        with sqlite3.connect(self.db_path, timeout=5) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, timestamp, endpoint_name, model, prompt_tokens, completion_tokens, total_tokens, cached_tokens FROM token_usage ORDER BY id DESC")
+            for row in cursor.fetchall():
+                writer.writerow(row)
+        return output.getvalue()
 
 token_tracker = TokenTracker()
 
@@ -826,7 +853,12 @@ def api_handler(method, path, body):
         last_id = int(qs.get("since", 0))
         return 200, sys_logger.get_logs_since(last_id), False
 
-    if method == "GET" and cp == "/api/token-stats": return 200, token_tracker.get_stats(), False
+    if method == "GET" and cp == "/api/token-stats":
+        qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
+        ep = qs.get("endpoint", "all")
+        # url decode
+        ep = urllib.parse.unquote(ep)
+        return 200, token_tracker.get_stats(endpoint_filter=ep), False
 
     if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
     if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
@@ -1066,21 +1098,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 .log-WARN { color: var(--yellow); flex-shrink: 0; min-width: 48px; text-align: center; }
 .log-ERROR { color: var(--red); flex-shrink: 0; min-width: 48px; text-align: center; }
 .log-msg { color: var(--text); }
+
+.tabs { display:flex; background:rgba(255,255,255,0.03); border-radius:10px; padding:3px; border:1px solid var(--border); }
+.tab { padding:6px 14px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; color:var(--text-dim); transition:all .2s; }
+.tab:hover { color:var(--text); }
+.tab.active { background:var(--accent); color:#fff; box-shadow:0 2px 8px rgba(0,0,0,0.2); }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1><span class="logo">⚡</span> API Pool</h1>
-  <div class="header-actions">
-    <button class="btn btn-ghost" onclick="openStatsModal()">📊 Token 统计</button>
+  <div style="display:flex; align-items:center; gap:30px;">
+      <h1><span class="logo">⚡</span> API Pool</h1>
+      <div class="tabs">
+          <div class="tab active" id="tabPool" onclick="switchTab('pool')">🔌 聚合池</div>
+          <div class="tab" id="tabAnalytics" onclick="switchTab('analytics')">📊 数据大盘</div>
+      </div>
+  </div>
+  <div class="header-actions" id="poolActions">
     <button class="btn btn-ghost" onclick="runHealthCheck()">🩺 健康检测</button>
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
     <button class="btn btn-green" onclick="testPool()">🧪 测试聚合池</button>
   </div>
+  <div class="header-actions" id="analyticsActions" style="display:none;">
+    <select id="analyticsFilter" class="btn btn-ghost" style="appearance:none; cursor:pointer; background:rgba(255,255,255,0.05);" onchange="loadAnalytics()">
+        <option value="all">全端点大盘</option>
+    </select>
+    <button class="btn btn-green" onclick="exportCSV()">📥 导出流水</button>
+  </div>
 </div>
 
+<div id="viewPool">
 <div class="api-info-card">
   <div style="font-size: 13px; font-weight: 700; color: var(--accent-light); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">🔗 客户端接入配置 (Client Config)</div>
   <div style="display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px;">
@@ -1119,6 +1168,43 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 <div class="log-card" style="margin-top:20px;">
   <div class="card-title"><span class="icon">📝</span> 实时日志</div>
   <div class="log-container" id="logContainer"></div>
+</div>
+</div>
+
+<div id="viewAnalytics" style="display:none; padding-bottom:40px;">
+    <div class="stats" id="tokenStatsOverview"></div>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div class="card">
+            <div class="card-title" style="margin-top:0px; font-size:11px;">今日各时段消耗趋势</div>
+            <div id="tokenTodayChart" style="height: 180px; margin-bottom: 0px; position: relative;"></div>
+        </div>
+        <div class="card">
+            <div class="card-title" style="margin-top:0px; font-size:11px;">近 14 天 Token 组成结构 (绿=缓存, 蓝=未命中, 灰=生成)</div>
+            <div id="tokenTrendChart" style="height: 180px; margin-bottom: 0px; position: relative;"></div>
+        </div>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top:20px;">
+        <div class="card">
+            <div class="card-title" style="font-size:11px;">今日模型端点排行榜</div>
+            <div style="max-height: 250px; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <tbody id="todayModelsTable"></tbody>
+              </table>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-title" style="font-size:11px;">本月模型端点排行榜</div>
+            <div style="max-height: 250px; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <tbody id="monthModelsTable"></tbody>
+              </table>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="modal-overlay" id="modal">
@@ -1162,48 +1248,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
   </div>
 </div>
 
-<div class="modal-overlay" id="statsModal">
-  <div class="modal" style="width: 800px; max-width: 95vw;">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 18px;">
-      <h2 style="margin:0;">📊 Token 使用统计</h2>
-      <button class="btn btn-ghost btn-sm" onclick="closeStatsModal()">关闭</button>
-    </div>
-    
-    <div class="stats" id="tokenStatsOverview"></div>
-    
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-        <div>
-            <div class="card-title" style="margin-top:20px; font-size:11px;">今日各时段消耗趋势</div>
-            <div id="tokenTodayChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
-        </div>
-        <div>
-            <div class="card-title" style="margin-top:20px; font-size:11px;">近 14 天消耗趋势</div>
-            <div id="tokenTrendChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
-        </div>
-    </div>
-    
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-        <div>
-            <div class="card-title" style="font-size:11px;">今日模型明细</div>
-            <div style="max-height: 200px; overflow-y: auto;">
-              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
-                <tbody id="todayModelsTable"></tbody>
-              </table>
-            </div>
-        </div>
-        <div>
-            <div class="card-title" style="font-size:11px;">本月模型明细</div>
-            <div style="max-height: 200px; overflow-y: auto;">
-              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
-                <tbody id="monthModelsTable"></tbody>
-              </table>
-            </div>
-        </div>
-    </div>
-  </div>
-</div>
+
 
 <div class="toast" id="toast"></div>
 
@@ -1546,18 +1591,136 @@ function drawSVGChart(containerId, data) {
     });
 }
 
-async function openStatsModal(){
-    document.getElementById('statsModal').classList.add('show');
+function drawCompositionChart(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!container || !data || !data.length) {
+        if(container) container.innerHTML = '<div class="empty">暂无数据</div>';
+        return;
+    }
+    const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
+    const padding = 10;
+    const w = container.clientWidth || 800;
+    const h = 180;
+    
+    let pts1 = [], pts2 = [], pts3 = [];
+    data.forEach((d, i) => {
+        const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
+        
+        const c1 = d.cached || 0;
+        const c2 = c1 + Math.max(0, (d.prompt || 0) - c1);
+        const c3 = Math.max(c2, d.tokens || 0); // ensuring it's the highest
+
+        const y1 = h - padding - (c1 / maxVal) * (h - 2 * padding);
+        const y2 = h - padding - (c2 / maxVal) * (h - 2 * padding);
+        const y3 = h - padding - (c3 / maxVal) * (h - 2 * padding);
+        
+        pts1.push(`${x},${y1}`);
+        pts2.push(`${x},${y2}`);
+        pts3.push(`${x},${y3}`);
+    });
+    
+    const poly1 = pts1.length ? `${pts1[0].split(',')[0]},${h} ${pts1.join(' ')} ${pts1[pts1.length-1].split(',')[0]},${h}` : '';
+    const poly2 = pts2.length ? `${pts2[0].split(',')[0]},${h} ${pts2.join(' ')} ${pts2[pts2.length-1].split(',')[0]},${h}` : '';
+    const poly3 = pts3.length ? `${pts3[0].split(',')[0]},${h} ${pts3.join(' ')} ${pts3[pts3.length-1].split(',')[0]},${h}` : '';
+    
+    container.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
+            <defs>
+                <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(150, 150, 150, 0.4)"/><stop offset="100%" stop-color="rgba(150, 150, 150, 0.0)"/></linearGradient>
+                <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(80, 150, 255, 0.5)"/><stop offset="100%" stop-color="rgba(80, 150, 255, 0.0)"/></linearGradient>
+                <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(0, 200, 100, 0.6)"/><stop offset="100%" stop-color="rgba(0, 200, 100, 0.0)"/></linearGradient>
+            </defs>
+            <polygon points="${poly3}" fill="url(#g3)"/>
+            <polyline points="${pts3.join(' ')}" fill="none" stroke="rgba(150,150,150,0.8)" stroke-width="1.5"/>
+            
+            <polygon points="${poly2}" fill="url(#g2)"/>
+            <polyline points="${pts2.join(' ')}" fill="none" stroke="rgba(80,150,255,0.8)" stroke-width="1.5"/>
+            
+            <polygon points="${poly1}" fill="url(#g1)"/>
+            <polyline points="${pts1.join(' ')}" fill="none" stroke="rgba(0,200,100,0.8)" stroke-width="1.5"/>
+            
+            ${data.map((d, i) => {
+                const [x, y] = pts3[i].split(',');
+                return `<circle cx="${x}" cy="${y}" r="4" fill="var(--bg)" stroke="rgba(150,150,150,0.8)" stroke-width="2" class="chart-point-comp" data-idx="${i}" style="cursor:pointer; transition:r 0.1s;"/>`;
+            }).join('')}
+        </svg>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:11px; box-shadow:var(--shadow); pointer-events:none; z-index:10; white-space:nowrap;"></div>
+    `;
+    
+    const tt = document.getElementById(`${containerId}_tt`);
+    container.querySelectorAll('.chart-point-comp').forEach(c => {
+        c.addEventListener('mouseenter', (e) => {
+            const idx = e.target.getAttribute('data-idx');
+            const d = data[idx];
+            c.setAttribute('r', '6');
+            tt.style.display = 'block';
+            
+            const pC = d.cached || 0;
+            const pU = Math.max(0, (d.prompt || 0) - pC);
+            const comp = Math.max(0, (d.tokens || 0) - pC - pU);
+            
+            tt.innerHTML = `
+                <div style="color:var(--text-dim);margin-bottom:6px;font-weight:bold;border-bottom:1px solid var(--border);padding-bottom:4px;">${d.date}</div>
+                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:var(--green)">命中缓存:</span> <span>${fmtNum(pC)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:var(--blue)">未命中 Prompt:</span> <span>${fmtNum(pU)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:#aaa">生成 Output:</span> <span>${fmtNum(comp)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:140px; margin-top:4px; padding-top:4px; border-top:1px dashed var(--border); font-weight:bold;"><span style="color:var(--text)">Total:</span> <span>${fmtNum(d.tokens)}</span></div>
+            `;
+            
+            let tx = parseFloat(c.getAttribute('cx')) + 10;
+            let ty = parseFloat(c.getAttribute('cy')) - 60;
+            if (tx + 160 > w) tx -= 180;
+            tt.style.left = tx + 'px';
+            tt.style.top = ty + 'px';
+        });
+        c.addEventListener('mouseleave', () => {
+            c.setAttribute('r', '4');
+            tt.style.display = 'none';
+        });
+    });
+}
+
+function switchTab(tabId) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(tabId === 'pool' ? 'tabPool' : 'tabAnalytics').classList.add('active');
+    
+    document.getElementById('viewPool').style.display = tabId === 'pool' ? 'block' : 'none';
+    document.getElementById('poolActions').style.display = tabId === 'pool' ? 'flex' : 'none';
+    
+    document.getElementById('viewAnalytics').style.display = tabId === 'analytics' ? 'block' : 'none';
+    document.getElementById('analyticsActions').style.display = tabId === 'analytics' ? 'flex' : 'none';
+    
+    if(tabId === 'analytics') {
+        loadAnalytics();
+    }
+}
+
+function exportCSV() {
+    window.open('/api/export-stats', '_blank');
+}
+
+async function loadAnalytics(){
+    const epFilter = document.getElementById('analyticsFilter').value || 'all';
     document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载中...</div>';
     document.getElementById('tokenTodayChart').innerHTML = '';
     document.getElementById('tokenTrendChart').innerHTML = '';
     document.getElementById('todayModelsTable').innerHTML = '';
     document.getElementById('monthModelsTable').innerHTML = '';
     
-    const r = await api('GET', '/api/token-stats');
+    const url = epFilter === 'all' ? '/api/token-stats' : '/api/token-stats?endpoint=' + encodeURIComponent(epFilter);
+    const r = await api('GET', url);
     if(!r.today && r.today !== 0) {
         document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载失败</div>';
         return;
+    }
+    
+    // Update Filter Dropdown Options only if currently empty or 'all' to avoid resetting user selection unnecessarilly
+    const sel = document.getElementById('analyticsFilter');
+    if (sel.options.length <= 1) {
+        let opts = '<option value="all">全端点大盘</option>';
+        r.all_endpoints_list.forEach(e => { opts += `<option value="${esc(e)}">${esc(e)}</option>`; });
+        sel.innerHTML = opts;
+        sel.value = epFilter;
     }
     
     document.getElementById('tokenStatsOverview').innerHTML = `
@@ -1573,7 +1736,7 @@ async function openStatsModal(){
     
     setTimeout(() => {
         drawSVGChart('tokenTodayChart', r.trend_today_hourly);
-        drawSVGChart('tokenTrendChart', r.trend_14d);
+        drawCompositionChart('tokenTrendChart', r.trend_14d);
     }, 50);
     
     const renderTbl = (data) => data && data.length ? data.map(d => `
@@ -1662,6 +1825,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self._send_html(GUI_HTML)
+        elif self.path.startswith("/api/export-stats"):
+            csv_data = token_tracker.export_csv()
+            try:
+                body = csv_data.encode("utf-8-sig")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", "attachment; filename=token_stats.csv")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except ConnectionError:
+                pass
         elif self.path.startswith("/api/"):
             res = api_handler("GET", self.path, {})
             if len(res) == 3 and res[2] is True:
