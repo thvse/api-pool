@@ -139,34 +139,35 @@ class TokenTracker:
                 trend_14d.append({"date": d_str, "tokens": data["total"], "prompt": data["prompt"], "cached": data["cached"], "completion": data["completion"]})
                 
             cursor.execute(f"""
-                SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens)
+                SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens), COUNT(*)
                 FROM token_usage
                 WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY h
             """, params)
-            raw_hourly = dict(cursor.fetchall())
+            raw_hourly = {r[0]: (r[1], r[2]) for r in cursor.fetchall()}
             trend_today_hourly = []
             for i in range(24):
                 h_str = f"{i:02d}"
-                trend_today_hourly.append({"date": f"{h_str}:00", "tokens": raw_hourly.get(h_str, 0)})
+                val = raw_hourly.get(h_str, (0, 0))
+                trend_today_hourly.append({"date": f"{h_str}:00", "tokens": val[0] or 0, "calls": val[1] or 0})
                 
             cursor.execute(f"""
-                SELECT endpoint_name, model, SUM(total_tokens)
+                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*)
                 FROM token_usage
                 WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """, params)
-            today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
+            today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0} for r in cursor.fetchall()]
             
             cursor.execute(f"""
-                SELECT endpoint_name, model, SUM(total_tokens)
+                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*)
                 FROM token_usage
                 WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """, params)
-            month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
+            month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0} for r in cursor.fetchall()]
 
             cursor.execute("SELECT DISTINCT endpoint_name FROM token_usage WHERE endpoint_name IS NOT NULL")
             all_endpoints_list = [r[0] for r in cursor.fetchall()]
@@ -1137,6 +1138,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 .tab { padding:6px 14px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; color:var(--text-dim); transition:all .2s; }
 .tab:hover { color:var(--text); }
 .tab.active { background:var(--accent); color:#fff; box-shadow:0 2px 8px rgba(0,0,0,0.2); }
+
+select option { background: var(--bg); color: var(--text); }
+
+.seg-ctrl { display:inline-flex; background:rgba(255,255,255,0.03); border-radius:8px; padding:3px; border:1px solid rgba(255,255,255,0.05); }
+.seg-btn { padding:3px 12px; border-radius:5px; font-size:11px; font-weight:600; cursor:pointer; color:var(--text-dim); transition:all 0.2s; }
+.seg-btn:hover { color:var(--text); }
+.seg-btn.active { background:rgba(255,255,255,0.1); color:#fff; box-shadow:0 2px 4px rgba(0,0,0,0.2); }
 </style>
 </head>
 <body>
@@ -1210,31 +1218,52 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
     
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
         <div class="card">
-            <div class="card-title" style="margin-top:0px; font-size:11px;">今日各时段消耗趋势</div>
-            <div id="tokenTodayChart" style="height: 180px; margin-bottom: 0px; position: relative;"></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0px;">
+                <div class="card-title" style="margin-bottom:0; font-size:11px;">今日各时段消耗趋势</div>
+                <div class="seg-ctrl">
+                    <div class="seg-btn active" id="btnTrendToken" onclick="switchTrend('tokens')">Token</div>
+                    <div class="seg-btn" id="btnTrendCall" onclick="switchTrend('calls')">请求数</div>
+                </div>
+            </div>
+            <div id="tokenTodayChart" style="height: 180px; position: relative;"></div>
+            <div id="callsTodayChart" style="height: 180px; position: relative; display:none;"></div>
         </div>
         <div class="card">
-            <div class="card-title" style="margin-top:0px; font-size:11px;">近 14 天 Token 组成结构 (绿=缓存, 蓝=未命中, 灰=生成)</div>
+            <div class="card-title" style="margin-top:4px; font-size:11px;">近 14 天 Token 组成结构 (绿=缓存, 蓝=未命中, 灰=生成)</div>
             <div id="tokenTrendChart" style="height: 180px; margin-bottom: 0px; position: relative;"></div>
         </div>
     </div>
     
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top:20px;">
         <div class="card">
-            <div class="card-title" style="font-size:11px;">今日模型端点排行榜</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <div class="card-title" style="margin-bottom:0; font-size:11px;">今日模型端点排行榜</div>
+                <div class="seg-ctrl">
+                    <div class="seg-btn active" id="btnTblTodayToken" onclick="switchTblToday('tokens')">Token</div>
+                    <div class="seg-btn" id="btnTblTodayCall" onclick="switchTblToday('calls')">请求数</div>
+                </div>
+            </div>
             <div style="max-height: 250px; overflow-y: auto;">
               <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">数值</th></tr></thead>
                 <tbody id="todayModelsTable"></tbody>
+                <tbody id="todayCallsTable" style="display:none;"></tbody>
               </table>
             </div>
         </div>
         <div class="card">
-            <div class="card-title" style="font-size:11px;">本月模型端点排行榜</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <div class="card-title" style="margin-bottom:0; font-size:11px;">本月模型端点排行榜</div>
+                <div class="seg-ctrl">
+                    <div class="seg-btn active" id="btnTblMonthToken" onclick="switchTblMonth('tokens')">Token</div>
+                    <div class="seg-btn" id="btnTblMonthCall" onclick="switchTblMonth('calls')">请求数</div>
+                </div>
+            </div>
             <div style="max-height: 250px; overflow-y: auto;">
               <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型端点</th><th style="padding: 6px; text-align:right;">数值</th></tr></thead>
                 <tbody id="monthModelsTable"></tbody>
+                <tbody id="monthCallsTable" style="display:none;"></tbody>
               </table>
             </div>
         </div>
@@ -1567,20 +1596,22 @@ function fmtNum(n) {
     return n.toLocaleString();
 }
 
-function drawSVGChart(containerId, data) {
+function drawSVGChart(containerId, data, options = {}) {
+    const key = options.key || 'tokens';
+    const unit = options.unit || 'Tokens';
     const container = document.getElementById(containerId);
     if (!data || data.length === 0) {
         if(container) container.innerHTML = '<div class="empty">暂无趋势数据</div>';
         return;
     }
-    const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
+    const maxVal = Math.max(...data.map(d => d[key])) || 1;
     const padding = 15;
     const w = container.clientWidth || 800;
     const h = 180;
     
     let pts = data.map((d, i) => {
         const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
-        const y = h - padding - (d.tokens / maxVal) * (h - 2 * padding);
+        const y = h - padding - (d[key] / maxVal) * (h - 2 * padding);
         return {x, y, d};
     });
     
@@ -1595,7 +1626,7 @@ function drawSVGChart(containerId, data) {
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
             <defs>
-                <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="chartGrad_${containerId}" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stop-color="rgba(124, 109, 240, 0.5)"/>
                     <stop offset="100%" stop-color="rgba(124, 109, 240, 0.0)"/>
                 </linearGradient>
@@ -1603,7 +1634,7 @@ function drawSVGChart(containerId, data) {
             <line x1="0" y1="${padding}" x2="${w}" y2="${padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h-padding}" x2="${w}" y2="${h-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
-            <path d="${polyD}" fill="url(#chartGrad)"/>
+            <path d="${polyD}" fill="url(#chartGrad_${containerId})"/>
             <path d="${pathD}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/>
             ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="var(--accent)" stroke-width="2" class="chart-point" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
         </svg>
@@ -1618,7 +1649,7 @@ function drawSVGChart(containerId, data) {
             c.setAttribute('r', '6');
             c.style.filter = 'drop-shadow(0 0 4px var(--accent-light))';
             tt.style.display = 'block';
-            tt.innerHTML = `<div style="color:var(--text-dim);margin-bottom:4px;font-weight:600">${d.date}</div><div style="font-weight:700;color:var(--accent-light);font-size:13px;">${fmtNum(d.tokens)} <span style="font-size:10px;font-weight:400;color:var(--text-dim)">Tokens</span></div>`;
+            tt.innerHTML = `<div style="color:var(--text-dim);margin-bottom:4px;font-weight:600">${d.date}</div><div style="font-weight:700;color:var(--accent-light);font-size:13px;">${fmtNum(d[key])} <span style="font-size:10px;font-weight:400;color:var(--text-dim)">${unit}</span></div>`;
             
             let tx = parseFloat(c.getAttribute('cx')) + 12;
             let ty = parseFloat(c.getAttribute('cy')) - 35;
@@ -1748,13 +1779,11 @@ function exportCSV() {
     window.open('/api/export-stats', '_blank');
 }
 
+let _analyticsData = null;
+
 async function loadAnalytics(){
     const epFilter = document.getElementById('analyticsFilter').value || 'all';
     document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载中...</div>';
-    document.getElementById('tokenTodayChart').innerHTML = '';
-    document.getElementById('tokenTrendChart').innerHTML = '';
-    document.getElementById('todayModelsTable').innerHTML = '';
-    document.getElementById('monthModelsTable').innerHTML = '';
     
     const url = epFilter === 'all' ? '/api/token-stats' : '/api/token-stats?endpoint=' + encodeURIComponent(epFilter);
     const r = await api('GET', url);
@@ -1762,8 +1791,8 @@ async function loadAnalytics(){
         document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载失败</div>';
         return;
     }
+    _analyticsData = r;
     
-    // Update Filter Dropdown Options only if currently empty or 'all' to avoid resetting user selection unnecessarilly
     const sel = document.getElementById('analyticsFilter');
     if (sel.options.length <= 1) {
         let opts = '<option value="all">全端点大盘</option>';
@@ -1784,30 +1813,72 @@ async function loadAnalytics(){
     `;
     
     setTimeout(() => {
-        drawSVGChart('tokenTodayChart', r.trend_today_hourly);
+        drawSVGChart('tokenTodayChart', r.trend_today_hourly, {key: 'tokens', unit: 'Tokens'});
+        drawSVGChart('callsTodayChart', r.trend_today_hourly, {key: 'calls', unit: '次'});
         drawCompositionChart('tokenTrendChart', r.trend_14d);
     }, 50);
     
-    const renderTbl = (data) => {
-        if (!data || !data.length) return '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
-        const maxT = Math.max(...data.map(d => d.tokens)) || 1;
-        return data.map(d => `
-            <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
-                <td colspan="2" style="padding: 4px 0;">
-                    <div class="tbl-progress-container">
-                        <div class="tbl-progress-bar" style="width: ${(d.tokens/maxT*100).toFixed(1)}%;"></div>
-                        <div class="tbl-content">
-                            <div><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></div>
-                            <div style="text-align:right; font-family: monospace; font-weight:600;">${fmtNum(d.tokens)}</div>
-                        </div>
-                    </div>
-                </td>
-            </tr>
-        `).join('');
-    };
+    switchTblToday('tokens', true);
+    switchTblMonth('tokens', true);
     
-    document.getElementById('todayModelsTable').innerHTML = renderTbl(r.today_endpoints);
-    document.getElementById('monthModelsTable').innerHTML = renderTbl(r.month_endpoints);
+    // Default switchTrend to tokens is already handled in HTML. But just ensure UI state:
+    switchTrend('tokens', true);
+}
+
+function renderTblData(containerId, data, key) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (!data || !data.length) {
+        el.innerHTML = '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+        return;
+    }
+    const maxVal = Math.max(...data.map(d => d[key])) || 1;
+    el.innerHTML = data.map(d => `
+        <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+            <td colspan="2" style="padding: 4px 0;">
+                <div class="tbl-progress-container">
+                    <div class="tbl-progress-bar" style="width: ${(d[key]/maxVal*100).toFixed(1)}%;"></div>
+                    <div class="tbl-content">
+                        <div><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></div>
+                        <div style="text-align:right; font-family: monospace; font-weight:600;">${fmtNum(d[key])}</div>
+                    </div>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function switchTrend(type, skipRender) {
+    document.getElementById('btnTrendToken').classList.toggle('active', type === 'tokens');
+    document.getElementById('btnTrendCall').classList.toggle('active', type === 'calls');
+    document.getElementById('tokenTodayChart').style.display = type === 'tokens' ? 'block' : 'none';
+    document.getElementById('callsTodayChart').style.display = type === 'calls' ? 'block' : 'none';
+}
+
+function switchTblToday(type, skipRender) {
+    document.getElementById('btnTblTodayToken').classList.toggle('active', type === 'tokens');
+    document.getElementById('btnTblTodayCall').classList.toggle('active', type === 'calls');
+    document.getElementById('todayModelsTable').style.display = type === 'tokens' ? 'table-row-group' : 'none';
+    document.getElementById('todayCallsTable').style.display = type === 'calls' ? 'table-row-group' : 'none';
+    if (!skipRender && _analyticsData) {
+        renderTblData(type === 'tokens' ? 'todayModelsTable' : 'todayCallsTable', _analyticsData.today_endpoints, type);
+    } else if (skipRender && _analyticsData) {
+        renderTblData('todayModelsTable', _analyticsData.today_endpoints, 'tokens');
+        renderTblData('todayCallsTable', _analyticsData.today_endpoints, 'calls');
+    }
+}
+
+function switchTblMonth(type, skipRender) {
+    document.getElementById('btnTblMonthToken').classList.toggle('active', type === 'tokens');
+    document.getElementById('btnTblMonthCall').classList.toggle('active', type === 'calls');
+    document.getElementById('monthModelsTable').style.display = type === 'tokens' ? 'table-row-group' : 'none';
+    document.getElementById('monthCallsTable').style.display = type === 'calls' ? 'table-row-group' : 'none';
+    if (!skipRender && _analyticsData) {
+        renderTblData(type === 'tokens' ? 'monthModelsTable' : 'monthCallsTable', _analyticsData.month_endpoints, type);
+    } else if (skipRender && _analyticsData) {
+        renderTblData('monthModelsTable', _analyticsData.month_endpoints, 'tokens');
+        renderTblData('monthCallsTable', _analyticsData.month_endpoints, 'calls');
+    }
 }
 
 let logAutoScroll = true;
