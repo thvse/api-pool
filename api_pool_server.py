@@ -538,7 +538,7 @@ class APIPool:
                 tried += 1
         raise AllEndpointsFailed(errors)
 
-    def _try_endpoint(self, ep, payload, timeout):
+    def _try_endpoint(self, ep, payload, timeout, log_usage=True):
         is_anthropic = (getattr(ep, "protocol", "openai") == "anthropic")
         
         if is_anthropic:
@@ -557,7 +557,30 @@ class APIPool:
                 if m.get("role") == "system":
                     sys_prompt += m.get("content", "") + "\n"
                 else:
-                    messages.append(m)
+                    role = m.get("role")
+                    content = m.get("content")
+                    if isinstance(content, list):
+                        new_content = []
+                        for c in content:
+                            if c.get("type") == "image_url":
+                                url_val = c.get("image_url", {}).get("url", "")
+                                if url_val.startswith("data:image/"):
+                                    try:
+                                        media_type = url_val.split(";")[0].replace("data:", "")
+                                        b64_data = url_val.split(",")[1]
+                                        new_content.append({
+                                            "type": "image",
+                                            "source": {"type": "base64", "media_type": media_type, "data": b64_data}
+                                        })
+                                    except Exception:
+                                        pass
+                                else:
+                                    new_content.append({"type": "text", "text": f"[Image URL: {url_val}]"})
+                            else:
+                                new_content.append(c)
+                        messages.append({"role": role, "content": new_content})
+                    else:
+                        messages.append(m)
             if sys_prompt:
                 anthropic_payload["system"] = sys_prompt.strip()
             anthropic_payload["messages"] = messages
@@ -654,7 +677,7 @@ class APIPool:
                         except Exception:
                             pass
                         finally:
-                            if has_usage:
+                            if has_usage and log_usage and not ep.name.startswith("test_"):
                                 token_tracker.add_usage(ep.name, ep.model, final_prompt_tokens, final_completion_tokens, final_total_tokens, final_cached_tokens)
                                 ep._today_used += final_total_tokens
                             resp.close()
@@ -670,8 +693,9 @@ class APIPool:
                             prompt_t = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                             tot = prompt_t + u.get("output_tokens", 0)
                             cached = u.get("cache_read_input_tokens", 0)
-                            token_tracker.add_usage(ep.name, ep.model, prompt_t, u.get("output_tokens", 0), tot, cached)
-                            ep._today_used += tot
+                            if log_usage and not ep.name.startswith("test_"):
+                                token_tracker.add_usage(ep.name, ep.model, prompt_t, u.get("output_tokens", 0), tot, cached)
+                                ep._today_used += tot
                         return reply.strip(), ""
                     else:
                         u = body.get("usage", {})
@@ -680,8 +704,9 @@ class APIPool:
                             cached = 0
                             if "prompt_tokens_details" in u and isinstance(u["prompt_tokens_details"], dict):
                                 cached = u["prompt_tokens_details"].get("cached_tokens", 0)
-                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot, cached)
-                            ep._today_used += tot
+                            if log_usage and not ep.name.startswith("test_"):
+                                token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot, cached)
+                                ep._today_used += tot
                         content = body["choices"][0]["message"].get("content")
                         return (content.strip() if content else ""), ""
                     
