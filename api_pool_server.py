@@ -557,15 +557,13 @@ class APIPool:
                     def stream_generator():
                         try:
                             for line in resp:
-                                if not line.strip() or not line.startswith(b"data: "):
-                                    continue
-                                if line.startswith(b"data: [DONE]"):
-                                    yield line
-                                    continue
-                                    
-                                try:
-                                    chunk = json.loads(line[6:].decode("utf-8"))
-                                    if is_anthropic:
+                                if is_anthropic:
+                                    if not line.strip() or not line.startswith(b"data: "):
+                                        continue
+                                    if line.startswith(b"data: [DONE]"):
+                                        continue
+                                    try:
+                                        chunk = json.loads(line[6:].decode("utf-8"))
                                         ctype = chunk.get("type")
                                         if ctype == "content_block_delta":
                                             text = chunk.get("delta", {}).get("text", "")
@@ -584,15 +582,20 @@ class APIPool:
                                             tot = u.get("input_tokens", 0)
                                             token_tracker.add_usage(ep.name, ep.model, tot, 0, tot)
                                             ep._today_used += tot
-                                    else:
-                                        if "usage" in chunk and chunk["usage"]:
-                                            u = chunk["usage"]
-                                            tot = u.get("total_tokens", 0)
-                                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
-                                            ep._today_used += tot
-                                        yield line
-                                except Exception:
-                                    if not is_anthropic: yield line
+                                    except Exception:
+                                        pass
+                                else:
+                                    yield line
+                                    if line.strip() and line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
+                                        try:
+                                            chunk = json.loads(line[6:].decode("utf-8"))
+                                            if "usage" in chunk and chunk["usage"]:
+                                                u = chunk["usage"]
+                                                tot = u.get("total_tokens", 0)
+                                                token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
+                                                ep._today_used += tot
+                                        except Exception:
+                                            pass
                         except Exception:
                             pass
                         finally:
