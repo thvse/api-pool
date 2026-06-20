@@ -1584,13 +1584,13 @@ function drawSVGChart(containerId, data) {
         return {x, y, d};
     });
     
-    let pathD = pts.length ? \`M \${pts[0].x},\${pts[0].y}\` : '';
+    let pathD = pts.length ? `M ${pts[0].x},${pts[0].y}` : '';
     for (let i = 1; i < pts.length; i++) {
         const prev = pts[i-1], curr = pts[i];
         const cpX = prev.x + (curr.x - prev.x) / 2;
-        pathD += \` C \${cpX},\${prev.y} \${cpX},\${curr.y} \${curr.x},\${curr.y}\`;
+        pathD += ` C ${cpX},${prev.y} ${cpX},${curr.y} ${curr.x},${curr.y}`;
     }
-    const polyD = pts.length ? \`\${pathD} L \${pts[pts.length-1].x},\${h} L \${pts[0].x},\${h} Z\` : '';
+    const polyD = pts.length ? `${pathD} L ${pts[pts.length-1].x},${h} L ${pts[0].x},${h} Z` : '';
     
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
@@ -1659,19 +1659,19 @@ function drawCompositionChart(containerId, data) {
     
     const genPath = (pts) => {
         if (!pts.length) return '';
-        let dStr = \`M \${pts[0].x},\${pts[0].y}\`;
+        let dStr = `M ${pts[0].x},${pts[0].y}`;
         for (let i = 1; i < pts.length; i++) {
             const prev = pts[i-1], curr = pts[i];
             const cpX = prev.x + (curr.x - prev.x) / 2;
-            dStr += \` C \${cpX},\${prev.y} \${cpX},\${curr.y} \${curr.x},\${curr.y}\`;
+            dStr += ` C ${cpX},${prev.y} ${cpX},${curr.y} ${curr.x},${curr.y}`;
         }
         return dStr;
     };
     
     const path1 = genPath(pts1), path2 = genPath(pts2), path3 = genPath(pts3);
-    const poly1 = pts1.length ? \`\${path1} L \${pts1[pts1.length-1].x},\${h} L \${pts1[0].x},\${h} Z\` : '';
-    const poly2 = pts2.length ? \`\${path2} L \${pts2[pts2.length-1].x},\${h} L \${pts2[0].x},\${h} Z\` : '';
-    const poly3 = pts3.length ? \`\${path3} L \${pts3[pts3.length-1].x},\${h} L \${pts3[0].x},\${h} Z\` : '';
+    const poly1 = pts1.length ? `${path1} L ${pts1[pts1.length-1].x},${h} L ${pts1[0].x},${h} Z` : '';
+    const poly2 = pts2.length ? `${path2} L ${pts2[pts2.length-1].x},${h} L ${pts2[0].x},${h} Z` : '';
+    const poly3 = pts3.length ? `${path3} L ${pts3[pts3.length-1].x},${h} L ${pts3[0].x},${h} Z` : '';
     
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
