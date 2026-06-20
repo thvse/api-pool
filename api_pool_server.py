@@ -535,6 +535,7 @@ class APIPool:
                 
                 if is_stream:
                     def stream_generator():
+                        stream_id = f"chatcmpl-{int(time.time()*1000)}"
                         try:
                             for line in resp:
                                 if is_anthropic:
@@ -548,7 +549,13 @@ class APIPool:
                                         if ctype == "content_block_delta":
                                             text = chunk.get("delta", {}).get("text", "")
                                             if text:
-                                                o_chunk = {"choices": [{"delta": {"content": text}}]}
+                                                o_chunk = {
+                                                    "id": stream_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": int(time.time()),
+                                                    "model": ep.model,
+                                                    "choices": [{"index": 0, "delta": {"content": text}}]
+                                                }
                                                 yield b"data: " + json.dumps(o_chunk).encode("utf-8") + b"\n\n"
                                         elif ctype == "message_stop":
                                             yield b"data: [DONE]\n\n"
