@@ -139,17 +139,18 @@ class TokenTracker:
                 trend_14d.append({"date": d_str, "tokens": data["total"], "prompt": data["prompt"], "cached": data["cached"], "completion": data["completion"]})
                 
             cursor.execute(f"""
-                SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens), COUNT(*)
+                SELECT strftime('%H', datetime(timestamp, 'localtime')) as h, SUM(total_tokens), COUNT(*), SUM(prompt_tokens), SUM(cached_tokens)
                 FROM token_usage
                 WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY h
             """, params)
-            raw_hourly = {r[0]: (r[1], r[2]) for r in cursor.fetchall()}
+            raw_hourly = {r[0]: (r[1], r[2], r[3] or 0, r[4] or 0) for r in cursor.fetchall()}
             trend_today_hourly = []
             for i in range(24):
                 h_str = f"{i:02d}"
-                val = raw_hourly.get(h_str, (0, 0))
-                trend_today_hourly.append({"date": f"{h_str}:00", "tokens": val[0] or 0, "calls": val[1] or 0})
+                val = raw_hourly.get(h_str, (0, 0, 0, 0))
+                missed = max(0, val[2] - val[3])
+                trend_today_hourly.append({"date": f"{h_str}:00", "tokens": val[0] or 0, "calls": val[1] or 0, "missed": missed})
                 
             cursor.execute(f"""
                 SELECT endpoint_name, model, SUM(total_tokens), COUNT(*)
@@ -1222,14 +1223,23 @@ select option { background: var(--bg); color: var(--text); }
                 <div class="card-title" style="margin-bottom:0; font-size:11px;">今日各时段消耗趋势</div>
                 <div class="seg-ctrl">
                     <div class="seg-btn active" id="btnTrendToken" onclick="switchTrend('tokens')">Token</div>
+                    <div class="seg-btn" id="btnTrendMissed" onclick="switchTrend('missed')">未命中</div>
                     <div class="seg-btn" id="btnTrendCall" onclick="switchTrend('calls')">请求数</div>
                 </div>
             </div>
             <div id="tokenTodayChart" style="height: 180px; position: relative;"></div>
+            <div id="missedTodayChart" style="height: 180px; position: relative; display:none;"></div>
             <div id="callsTodayChart" style="height: 180px; position: relative; display:none;"></div>
         </div>
         <div class="card">
-            <div class="card-title" style="margin-top:4px; font-size:11px;">近 14 天 Token 组成结构 (绿=缓存, 蓝=未命中, 灰=生成)</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <div class="card-title" style="margin-bottom:0; font-size:11px;">近 14 天 Token 组成结构</div>
+                <div style="display:flex; gap:10px; font-size:11px; color:var(--text-dim);">
+                    <label style="cursor:pointer; display:flex; align-items:center; gap:3px;"><input type="checkbox" id="chkCompCache" checked onchange="updateCompChart()"> <span style="color:var(--green)">命中缓存</span></label>
+                    <label style="cursor:pointer; display:flex; align-items:center; gap:3px;"><input type="checkbox" id="chkCompMissed" checked onchange="updateCompChart()"> <span style="color:var(--blue)">未命中</span></label>
+                    <label style="cursor:pointer; display:flex; align-items:center; gap:3px;"><input type="checkbox" id="chkCompGen" checked onchange="updateCompChart()"> <span style="color:#aaa">生成</span></label>
+                </div>
+            </div>
             <div id="tokenTrendChart" style="height: 180px; margin-bottom: 0px; position: relative;"></div>
         </div>
     </div>
@@ -1623,6 +1633,9 @@ function drawSVGChart(containerId, data, options = {}) {
     }
     const polyD = pts.length ? `${pathD} L ${pts[pts.length-1].x},${h} L ${pts[0].x},${h} Z` : '';
     
+    const yTicks = [maxVal, maxVal/2, 0];
+    const yTickElements = yTicks.map(val => `<text x="5" y="${h - padding - (val/maxVal)*(h - 2*padding) - 4}" fill="var(--text-dim)" font-size="10" font-family="monospace">${fmtNum(val)}</text>`).join('');
+
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
             <defs>
@@ -1634,11 +1647,12 @@ function drawSVGChart(containerId, data, options = {}) {
             <line x1="0" y1="${padding}" x2="${w}" y2="${padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h-padding}" x2="${w}" y2="${h-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            ${yTickElements}
             <path d="${polyD}" fill="url(#chartGrad_${containerId})"/>
             <path d="${pathD}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/>
             ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="var(--accent)" stroke-width="2" class="chart-point" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
         </svg>
-        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:8px 12px; font-size:11px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:10; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:8px 12px; font-size:11px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:100; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
     `;
     
     const tt = document.getElementById(`${containerId}_tt`);
@@ -1654,7 +1668,8 @@ function drawSVGChart(containerId, data, options = {}) {
             let tx = parseFloat(c.getAttribute('cx')) + 12;
             let ty = parseFloat(c.getAttribute('cy')) - 35;
             if (tx + 120 > container.clientWidth) tx = container.clientWidth - 130;
-            if (ty < 0) ty = 10;
+            if (ty < 0) ty = parseFloat(c.getAttribute('cy')) + 15;
+            if (ty + 50 > container.clientHeight) ty = container.clientHeight - 55;
             tt.style.left = tx + 'px';
             tt.style.top = ty + 'px';
         });
@@ -1672,7 +1687,15 @@ function drawCompositionChart(containerId, data) {
         if(container) container.innerHTML = '<div class="empty">暂无数据</div>';
         return;
     }
-    const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
+    const showCache = document.getElementById('chkCompCache')?.checked ?? true;
+    const showMissed = document.getElementById('chkCompMissed')?.checked ?? true;
+    const showGen = document.getElementById('chkCompGen')?.checked ?? true;
+
+    const maxVal = Math.max(...data.map(d => {
+        const c1 = showCache ? (d.cached || 0) : 0;
+        const c2 = c1 + (showMissed ? Math.max(0, (d.prompt || 0) - (d.cached || 0)) : 0);
+        return c2 + (showGen ? Math.max(0, (d.tokens || 0) - (d.prompt || 0)) : 0);
+    })) || 1;
     const padding = 15;
     const w = container.clientWidth || 800;
     const h = 180;
@@ -1680,12 +1703,13 @@ function drawCompositionChart(containerId, data) {
     let pts1 = [], pts2 = [], pts3 = [];
     data.forEach((d, i) => {
         const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
-        const c1 = d.cached || 0;
-        const c2 = c1 + Math.max(0, (d.prompt || 0) - c1);
-        const c3 = Math.max(c2, d.tokens || 0);
-        pts1.push({x, y: h - padding - (c1 / maxVal) * (h - 2 * padding)});
-        pts2.push({x, y: h - padding - (c2 / maxVal) * (h - 2 * padding)});
-        pts3.push({x, y: h - padding - (c3 / maxVal) * (h - 2 * padding)});
+        const c1 = showCache ? (d.cached || 0) : 0;
+        const c2 = c1 + (showMissed ? Math.max(0, (d.prompt || 0) - (d.cached || 0)) : 0);
+        const c3 = c2 + (showGen ? Math.max(0, (d.tokens || 0) - (d.prompt || 0)) : 0);
+        
+        if(showCache) pts1.push({x, y: h - padding - (c1 / maxVal) * (h - 2 * padding)});
+        if(showMissed) pts2.push({x, y: h - padding - (c2 / maxVal) * (h - 2 * padding)});
+        if(showGen) pts3.push({x, y: h - padding - (c3 / maxVal) * (h - 2 * padding)});
     });
     
     const genPath = (pts) => {
@@ -1704,6 +1728,9 @@ function drawCompositionChart(containerId, data) {
     const poly2 = pts2.length ? `${path2} L ${pts2[pts2.length-1].x},${h} L ${pts2[0].x},${h} Z` : '';
     const poly3 = pts3.length ? `${path3} L ${pts3[pts3.length-1].x},${h} L ${pts3[0].x},${h} Z` : '';
     
+    const yTicks = [maxVal, maxVal/2, 0];
+    const yTickElements = yTicks.map(val => `<text x="5" y="${h - padding - (val/maxVal)*(h - 2*padding) - 4}" fill="var(--text-dim)" font-size="10" font-family="monospace">${fmtNum(val)}</text>`).join('');
+
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
             <defs>
@@ -1714,14 +1741,14 @@ function drawCompositionChart(containerId, data) {
             <line x1="0" y1="${padding}" x2="${w}" y2="${padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             <line x1="0" y1="${h-padding}" x2="${w}" y2="${h-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            ${yTickElements}
+            ${showGen ? `<path d="${poly3}" fill="url(#g3)"/><path d="${path3}" fill="none" stroke="rgba(150,150,150,0.8)" stroke-width="2"/>` : ''}
+            ${showMissed ? `<path d="${poly2}" fill="url(#g2)"/><path d="${path2}" fill="none" stroke="rgba(80,150,255,0.8)" stroke-width="2"/>` : ''}
+            ${showCache ? `<path d="${poly1}" fill="url(#g1)"/><path d="${path1}" fill="none" stroke="rgba(0,200,100,0.8)" stroke-width="2"/>` : ''}
             
-            <path d="${poly3}" fill="url(#g3)"/><path d="${path3}" fill="none" stroke="rgba(150,150,150,0.8)" stroke-width="2"/>
-            <path d="${poly2}" fill="url(#g2)"/><path d="${path2}" fill="none" stroke="rgba(80,150,255,0.8)" stroke-width="2"/>
-            <path d="${poly1}" fill="url(#g1)"/><path d="${path1}" fill="none" stroke="rgba(0,200,100,0.8)" stroke-width="2"/>
-            
-            ${pts3.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="rgba(200,200,200,0.9)" stroke-width="2" class="chart-point-comp" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
+            ${(showGen?pts3:(showMissed?pts2:pts1)).map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="rgba(200,200,200,0.9)" stroke-width="2" class="chart-point-comp" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
         </svg>
-        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 14px; font-size:12px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:10; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 14px; font-size:12px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:100; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
     `;
     
     const tt = document.getElementById(`${containerId}_tt`);
@@ -1739,16 +1766,17 @@ function drawCompositionChart(containerId, data) {
             
             tt.innerHTML = `
                 <div style="color:var(--text-dim);margin-bottom:8px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:6px;">${d.date}</div>
-                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--green)">命中缓存:</span> <span style="font-family:monospace">${fmtNum(pC)}</span></div>
-                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--blue)">未命中 Prompt:</span> <span style="font-family:monospace">${fmtNum(pU)}</span></div>
-                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:#aaa">生成 Output:</span> <span style="font-family:monospace">${fmtNum(comp)}</span></div>
+                ${showCache ? `<div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--green)">命中缓存:</span> <span style="font-family:monospace">${fmtNum(pC)}</span></div>` : ''}
+                ${showMissed ? `<div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--blue)">未命中 Prompt:</span> <span style="font-family:monospace">${fmtNum(pU)}</span></div>` : ''}
+                ${showGen ? `<div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:#aaa">生成 Output:</span> <span style="font-family:monospace">${fmtNum(comp)}</span></div>` : ''}
                 <div style="display:flex; justify-content:space-between; width:160px; margin-top:6px; padding-top:6px; border-top:1px dashed rgba(255,255,255,0.1); font-weight:800; font-size:13px;"><span style="color:var(--text)">Total:</span> <span style="font-family:monospace">${fmtNum(d.tokens)}</span></div>
             `;
             
             let tx = parseFloat(c.getAttribute('cx')) + 15;
-            let ty = parseFloat(c.getAttribute('cy')) - 60;
+            let ty = parseFloat(c.getAttribute('cy')) - tt.clientHeight - 10;
             if (tx + 200 > container.clientWidth) tx = container.clientWidth - 210;
-            if (ty < 0) ty = 10;
+            if (ty < 0 || isNaN(ty)) ty = parseFloat(c.getAttribute('cy')) + 15;
+            if (ty + 130 > container.clientHeight) ty = container.clientHeight - 135;
             tt.style.left = tx + 'px';
             tt.style.top = ty + 'px';
         });
@@ -1814,6 +1842,7 @@ async function loadAnalytics(){
     
     setTimeout(() => {
         drawSVGChart('tokenTodayChart', r.trend_today_hourly, {key: 'tokens', unit: 'Tokens'});
+        drawSVGChart('missedTodayChart', r.trend_today_hourly, {key: 'missed', unit: 'Tokens'});
         drawSVGChart('callsTodayChart', r.trend_today_hourly, {key: 'calls', unit: '次'});
         drawCompositionChart('tokenTrendChart', r.trend_14d);
     }, 50);
@@ -1848,10 +1877,16 @@ function renderTblData(containerId, data, key) {
     `).join('');
 }
 
+function updateCompChart() {
+    if (_analyticsData) drawCompositionChart('tokenTrendChart', _analyticsData.trend_14d);
+}
+
 function switchTrend(type, skipRender) {
     document.getElementById('btnTrendToken').classList.toggle('active', type === 'tokens');
+    document.getElementById('btnTrendMissed').classList.toggle('active', type === 'missed');
     document.getElementById('btnTrendCall').classList.toggle('active', type === 'calls');
     document.getElementById('tokenTodayChart').style.display = type === 'tokens' ? 'block' : 'none';
+    document.getElementById('missedTodayChart').style.display = type === 'missed' ? 'block' : 'none';
     document.getElementById('callsTodayChart').style.display = type === 'calls' ? 'block' : 'none';
 }
 
