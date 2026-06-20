@@ -93,7 +93,7 @@ class TokenTracker:
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE endpoint_name = ? AND timestamp >= date('now', 'localtime')", (endpoint_name,))
+                cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE endpoint_name = ? AND timestamp >= datetime(date('now', 'localtime'), 'utc')", (endpoint_name,))
                 return cursor.fetchone()[0] or 0
         except Exception:
             return 0
@@ -101,18 +101,18 @@ class TokenTracker:
     def get_stats(self):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= date('now', 'localtime')")
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')")
             today_row = cursor.fetchone()
             today = today_row[0] or 0
             today_cached = today_row[1] or 0
             today_prompt = today_row[2] or 0
             today_cache_hit_rate = round(today_cached / today_prompt * 100, 1) if today_prompt > 0 else 0
             
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-2 days', 'localtime')")
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-2 days', 'localtime'), 'utc')")
             last_3_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-6 days', 'localtime')")
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-6 days', 'localtime'), 'utc')")
             last_7_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= date('now', '-29 days', 'localtime')")
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-29 days', 'localtime'), 'utc')")
             month_row = cursor.fetchone()
             last_30_days = month_row[0] or 0
             month_cached = month_row[1] or 0
@@ -122,7 +122,7 @@ class TokenTracker:
             cursor.execute("""
                 SELECT date(timestamp, 'localtime') as d, SUM(total_tokens)
                 FROM token_usage
-                WHERE timestamp >= date('now', '-13 days', 'localtime')
+                WHERE timestamp >= datetime(date('now', '-13 days', 'localtime'), 'utc')
                 GROUP BY d
             """)
             raw_trend = dict(cursor.fetchall())
@@ -135,7 +135,7 @@ class TokenTracker:
             cursor.execute("""
                 SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
-                WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+                WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """)
