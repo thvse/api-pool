@@ -9,17 +9,126 @@ import os
 import json
 import time
 import threading
+import sqlite3
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+from datetime import datetime, timedelta
 
 LATENCY_OK_MAX = 2000     
 LATENCY_SLOW_MAX = 5000   
 HEALTH_CHECK_INTERVAL = 120  
 
+class LogManager:
+    def __init__(self, max_history=300):
+        self.history = []
+        self.lock = threading.Lock()
+        self.max_history = max_history
+        self._counter = 0
+
+    def log(self, level, msg):
+        ts = time.time()
+        time_str = datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+        with self.lock:
+            self._counter += 1
+            entry = {"id": self._counter, "time": time_str, "level": level, "msg": msg, "timestamp": ts}
+            self.history.append(entry)
+            if len(self.history) > self.max_history:
+                self.history.pop(0)
+
+    def get_logs_since(self, last_id):
+        with self.lock:
+            return [log for log in self.history if log["id"] > last_id]
+
+sys_logger = LogManager()
+def sys_log(msg, level="INFO"):
+    sys_logger.log(level, msg)
+    print(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}")
+
+class TokenTracker:
+    def __init__(self, db_path="token_stats.db"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    model TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON token_usage(timestamp)")
+
+    def add_usage(self, model, prompt_tokens, completion_tokens, total_tokens):
+        def _do_insert():
+            try:
+                with sqlite3.connect(self.db_path, timeout=5) as conn:
+                    conn.execute(
+                        "INSERT INTO token_usage (model, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?)",
+                        (model, prompt_tokens, completion_tokens, total_tokens)
+                    )
+            except Exception as e:
+                sys_log(f"记录 token 消耗失败: {e}", "WARN")
+        threading.Thread(target=_do_insert, daemon=True).start()
+
+    def get_stats(self):
+        with sqlite3.connect(self.db_path, timeout=5) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', 'localtime')")
+            today = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-2 days', 'localtime')")
+            last_3_days = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-6 days', 'localtime')")
+            last_7_days = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-29 days', 'localtime')")
+            last_30_days = cursor.fetchone()[0] or 0
+            
+            cursor.execute("""
+                SELECT date(timestamp, 'localtime') as d, SUM(total_tokens)
+                FROM token_usage
+                WHERE timestamp >= date('now', '-13 days', 'localtime')
+                GROUP BY d
+            """)
+            raw_trend = dict(cursor.fetchall())
+            trend_14d = []
+            now = datetime.now()
+            for i in range(13, -1, -1):
+                d_str = (now - timedelta(days=i)).strftime('%Y-%m-%d')
+                trend_14d.append({"date": d_str, "tokens": raw_trend.get(d_str, 0)})
+                
+            cursor.execute("""
+                SELECT model, SUM(total_tokens)
+                FROM token_usage
+                WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+                GROUP BY model
+                ORDER BY SUM(total_tokens) DESC
+            """)
+            today_models = [{"model": r[0], "tokens": r[1]} for r in cursor.fetchall()]
+            
+            cursor.execute("""
+                SELECT model, SUM(total_tokens)
+                FROM token_usage
+                WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime')
+                GROUP BY model
+                ORDER BY SUM(total_tokens) DESC
+            """)
+            month_models = [{"model": r[0], "tokens": r[1]} for r in cursor.fetchall()]
+
+            return {
+                "today": today, "last_3_days": last_3_days, "last_7_days": last_7_days, "last_30_days": last_30_days,
+                "trend_14d": trend_14d, "today_models": today_models, "month_models": month_models
+            }
+
+token_tracker = TokenTracker()
 
 # ============================================================
 #  数据结构
@@ -222,6 +331,7 @@ class APIPool:
                     ep._health_latency_ms = latency
                     ep._health_last_check = now
                     ep._health_error = error
+        sys_log(f"健康检测完成: 检测了 {len(endpoints)} 个端点", "INFO")
         return [{"name": n, "health": h, "latency_ms": l, "error": e} for n, h, l, e in results]
 
     def _is_in_cooldown(self, ep):
@@ -252,6 +362,7 @@ class APIPool:
         failed_ep._last_error = error_msg
         failed_ep._last_error_ts = time.time()
         self._set_cooldown(failed_ep)
+        sys_log(f"端点 '{failed_ep.name}' 触发冷却机制，下次可用时间在 {failed_ep.cooldown_minutes} 分钟后", "WARN")
         active = self._active_endpoints()
         if active:
             for i, ep in enumerate(active):
@@ -297,12 +408,19 @@ class APIPool:
                 "model": ep_model, "messages": messages,
                 **self.default_payload, **(extra_payload or {}),
             }
+            if tried == 0:
+                sys_log(f"收到 API 请求，尝试请求端点 '{ep.name}' (模型: {ep_model})", "INFO")
+            else:
+                sys_log(f"重试请求，尝试端点 '{ep.name}' (模型: {ep_model})", "INFO")
+
             result, error = self._try_endpoint(ep, payload, ep_timeout)
             if result is not None:
                 with self._lock:
                     self._on_success(ep)
+                sys_log(f"端点 '{ep.name}' 请求成功 (延迟: 正常)", "INFO")
                 return result
             errors.append(f"[{ep.name}] {error}")
+            sys_log(f"端点 '{ep.name}' 请求失败: {error}", "ERROR")
             with self._lock:
                 self._rotate(ep, error)
                 active = self._active_endpoints()
@@ -341,6 +459,14 @@ class APIPool:
                     def stream_generator():
                         try:
                             for line in resp:
+                                if line.strip() and line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
+                                    try:
+                                        chunk = json.loads(line[6:].decode("utf-8"))
+                                        if "usage" in chunk and chunk["usage"]:
+                                            u = chunk["usage"]
+                                            token_tracker.add_usage(ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), u.get("total_tokens", 0))
+                                    except Exception:
+                                        pass
                                 yield line
                         except Exception:
                             pass
@@ -349,6 +475,9 @@ class APIPool:
                     return stream_generator(), ""
                 else:
                     body = json.loads(resp.read().decode("utf-8"))
+                    u = body.get("usage", {})
+                    if u:
+                        token_tracker.add_usage(ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), u.get("total_tokens", 0))
                     return body["choices"][0]["message"]["content"].strip(), ""
                     
             except urllib.error.HTTPError as e:
@@ -488,6 +617,13 @@ def api_handler(method, path, body):
     if method == "POST" and cp in ("/v1/chat/completions", "/chat/completions"):
         messages = body.get("messages", [])
         is_stream = body.get("stream", False)
+        
+        if is_stream:
+            if "stream_options" not in body:
+                body["stream_options"] = {"include_usage": True}
+            elif isinstance(body["stream_options"], dict):
+                body["stream_options"]["include_usage"] = True
+                
         extra_payload = {k: v for k, v in body.items() if k not in ("messages", "model")}
         
         try:
@@ -508,6 +644,13 @@ def api_handler(method, path, body):
             return 500, {"error": {"message": f"所有端点均已失效: {e.errors}", "type": "server_error"}}, False
         except Exception as e:
             return 500, {"error": {"message": str(e), "type": "server_error"}}, False
+
+    if method == "GET" and cp == "/api/logs":
+        qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
+        last_id = int(qs.get("since", 0))
+        return 200, sys_logger.get_logs_since(last_id), False
+
+    if method == "GET" and cp == "/api/token-stats": return 200, token_tracker.get_stats(), False
 
     if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
     if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
@@ -578,14 +721,14 @@ GUI_HTML = r"""<!DOCTYPE html>
 <title>API Pool 聚合管理</title>
 <style>
 :root{
-  --bg:#0a0c10;--card:#13161e;--card-hover:#1a1e2a;--border:#1e2230;
-  --text:#e8eaf0;--text-dim:#6b7194;--accent:#7c6df0;--accent-light:#a599ff;
-  --green:#34d399;--green-dim:rgba(52,211,153,.12);--red:#f87171;--red-dim:rgba(248,113,113,.12);
-  --yellow:#fbbf24;--yellow-dim:rgba(251,191,36,.12);--blue:#60a5fa;--blue-dim:rgba(96,165,250,.12);
-  --radius:10px;--shadow:0 1px 3px rgba(0,0,0,.3),0 1px 2px rgba(0,0,0,.2);
+  --bg:#090a0f;--card:rgba(255,255,255,0.03);--card-hover:rgba(255,255,255,0.06);--border:rgba(255,255,255,0.08);
+  --text:#ffffff;--text-dim:rgba(255,255,255,0.5);--accent:#5e5ce6;--accent-light:#7d7aff;
+  --green:#32d74b;--green-dim:rgba(50,215,75,0.15);--red:#ff453a;--red-dim:rgba(255,69,58,0.15);
+  --yellow:#ffd60a;--yellow-dim:rgba(255,214,10,0.15);--blue:#0a84ff;--blue-dim:rgba(10,132,255,0.15);
+  --radius:16px;--shadow:0 8px 32px 0 rgba(0,0,0,0.3);--glass-blur:blur(24px);
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:20px 24px;font-size:14px;line-height:1.5}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-ui,sans-serif;background-color:var(--bg);background-image:radial-gradient(circle at 15% 50%, rgba(94,92,230,0.2), transparent 50%),radial-gradient(circle at 85% 30%, rgba(10,132,255,0.2), transparent 50%),radial-gradient(circle at 50% 80%, rgba(255,69,58,0.15), transparent 50%);background-attachment:fixed;color:var(--text);min-height:100vh;padding:20px 24px;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
 
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
 .header h1{font-size:20px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
@@ -605,12 +748,8 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
 
 .api-info-card {
-  background: rgba(124, 109, 240, 0.05); 
-  border: 1px solid var(--accent); 
-  border-radius: var(--radius); 
-  padding: 14px 18px; 
-  margin-bottom: 20px;
-  box-shadow: var(--shadow);
+  background: rgba(94, 92, 230, 0.08); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(94, 92, 230, 0.3); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 20px; box-shadow: var(--shadow);
 }
 .api-info-card code {
   background: var(--bg);
@@ -626,12 +765,13 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .grid{display:grid;grid-template-columns:1fr 360px;gap:20px;align-items:start}
 @media(max-width:920px){.grid{grid-template-columns:1fr}}
 
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow)}
+.card{background:var(--card);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow)}
 .card-title{font-size:13px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:7px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px}
 .card-title .icon{font-size:15px}
 
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
-.stat-item{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:8px;padding:12px 10px;text-align:center}
+.stat-item{background:rgba(255,255,255,.02);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;transition:transform .2s,box-shadow .2s;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.stat-item:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.2)}
 .stat-item .num{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
 .stat-item .label{font-size:10px;color:var(--text-dim);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
 
@@ -642,8 +782,8 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .filter-count{font-size:11px;color:var(--text-dim);margin-left:auto}
 
 .ep-list{display:flex;flex-direction:column;gap:6px}
-.ep-item{background:rgba(255,255,255,.015);border:1px solid var(--border);border-radius:8px;padding:12px 14px;transition:all .12s}
-.ep-item:hover{border-color:#2a3050;background:var(--card-hover)}
+.ep-item{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:12px;padding:12px 14px;transition:all .2s cubic-bezier(0.2,0.8,0.2,1)}
+.ep-item:hover{border-color:rgba(255,255,255,.15);background:var(--card-hover);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.2)}
 .ep-item.disabled{opacity:.4}
 .ep-item.current{border-color:var(--green);background:var(--green-dim)}
 .ep-item.in-cooldown{border-color:var(--yellow);background:var(--yellow-dim)}
@@ -684,11 +824,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:1000;opacity:0;pointer-events:none;transition:opacity .15s}
 .modal-overlay.show{opacity:1;pointer-events:all}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;width:560px;max-width:94vw;max-height:88vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.modal{background:var(--card);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:16px;padding:24px;width:560px;max-width:94vw;max-height:88vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 .modal h2{font-size:16px;margin-bottom:18px;font-weight:700}
 .form-group{margin-bottom:12px}
 .form-group label{display:block;font-size:11px;font-weight:600;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
-.form-group input,.form-group select{width:100%;padding:9px 11px;background:var(--bg);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;outline:none;transition:border-color .12s}
+.form-group input,.form-group select{width:100%;padding:9px 11px;background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:13px;outline:none;transition:border-color .12s;box-shadow:inset 0 1px 2px rgba(0,0,0,0.1)}
 .form-group input:focus,.form-group select:focus{border-color:var(--accent)}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
@@ -738,6 +878,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 .test-result{margin-top:8px;padding:8px 10px;border-radius:7px;font-size:11px;word-break:break-all;max-height:130px;overflow-y:auto;white-space:pre-wrap;font-family:'SF Mono',Menlo,Consolas,monospace}
 .test-result.success{background:var(--green-dim);color:var(--green)}
 .test-result.failure{background:var(--red-dim);color:var(--red)}
+
+.log-card { background: var(--card); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+.log-container { height: 280px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; display: flex; flex-direction: column; gap: 6px; scroll-behavior: smooth; }
+.log-line { display: flex; gap: 8px; line-height: 1.5; word-break: break-all; }
+.log-time { color: var(--text-dim); flex-shrink: 0; user-select: none; }
+.log-INFO { color: var(--blue); flex-shrink: 0; min-width: 48px; text-align: center; }
+.log-WARN { color: var(--yellow); flex-shrink: 0; min-width: 48px; text-align: center; }
+.log-ERROR { color: var(--red); flex-shrink: 0; min-width: 48px; text-align: center; }
+.log-msg { color: var(--text); }
 </style>
 </head>
 <body>
@@ -745,6 +894,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
 <div class="header">
   <h1><span class="logo">⚡</span> API Pool</h1>
   <div class="header-actions">
+    <button class="btn btn-ghost" onclick="openStatsModal()">📊 Token 统计</button>
     <button class="btn btn-ghost" onclick="runHealthCheck()">🩺 健康检测</button>
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
@@ -787,6 +937,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
   </div>
 </div>
 
+<div class="log-card" style="margin-top:20px;">
+  <div class="card-title"><span class="icon">📝</span> 实时日志</div>
+  <div class="log-container" id="logContainer"></div>
+</div>
+
 <div class="modal-overlay" id="modal">
   <div class="modal">
     <h2 id="modalTitle">添加端点</h2>
@@ -816,6 +971,41 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,s
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
       <button class="btn btn-green" id="batchAddBtn" style="display:none" onclick="batchAddEndpoints()">📦 批量添加</button>
       <button class="btn btn-primary" id="singleAddBtn" onclick="saveEndpoint()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="statsModal">
+  <div class="modal" style="width: 800px; max-width: 95vw;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 18px;">
+      <h2 style="margin:0;">📊 Token 使用统计</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeStatsModal()">关闭</button>
+    </div>
+    
+    <div class="stats" id="tokenStatsOverview"></div>
+    
+    <div class="card-title" style="margin-top:20px; font-size:11px;">近 14 天消耗趋势</div>
+    <div id="tokenTrendChart" style="height: 140px; margin-bottom: 20px; position: relative;"></div>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div>
+            <div class="card-title" style="font-size:11px;">今日模型明细</div>
+            <div style="max-height: 200px; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <tbody id="todayModelsTable"></tbody>
+              </table>
+            </div>
+        </div>
+        <div>
+            <div class="card-title" style="font-size:11px;">本月模型明细</div>
+            <div style="max-height: 200px; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-dim);"><th style="padding: 6px;">模型</th><th style="padding: 6px; text-align:right;">Token</th></tr></thead>
+                <tbody id="monthModelsTable"></tbody>
+              </table>
+            </div>
+        </div>
     </div>
   </div>
 </div>
@@ -886,15 +1076,15 @@ function renderEndpoints(eps){
       <div class="ep-header">
         <div class="ep-name">${esc(ep.name)} ${b}</div>
         <div class="ep-actions">
-          <button class="btn btn-ghost btn-sm" onclick="testEndpoint('${esc(ep.name)}')">🧪</button>
-          ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" onclick="clearCooldown('${esc(ep.name)}')">⏰</button>`:''}
-          <button class="btn btn-ghost btn-sm" onclick="toggleEndpoint('${esc(ep.name)}')">${ep.enabled?'⏸':'▶'}</button>
-          <button class="btn btn-ghost btn-sm" onclick="editEndpoint('${esc(ep.name)}')">✏️</button>
-          <button class="btn btn-ghost btn-sm" onclick="deleteEndpoint('${esc(ep.name)}')" style="color:var(--red)">🗑</button>
+          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="testEndpoint('${esc(ep.name)}')">🧪</button>
+          ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${esc(ep.name)}')">⏰</button>`:''}
+          <button class="btn btn-ghost btn-sm" title="${ep.enabled?'禁用端点':'启用端点'}" onclick="toggleEndpoint('${esc(ep.name)}')">${ep.enabled?'⏸':'▶'}</button>
+          <button class="btn btn-ghost btn-sm" title="编辑端点" onclick="editEndpoint('${esc(ep.name)}')">✏️</button>
+          <button class="btn btn-ghost btn-sm" title="删除端点" onclick="deleteEndpoint('${esc(ep.name)}')" style="color:var(--red)">🗑</button>
         </div>
       </div>
       <div class="ep-meta">
-        <span>🤖${esc(ep.model)}</span><span>⏱${ep.timeout}s</span><span>🔁${ep.max_retries}次</span><span>❄️${ep.cooldown_minutes}分</span><span>📞${ep.total_calls}次</span><span>🕐${last}</span>
+        <span title="绑定的模型名称">🤖${esc(ep.model)}</span><span title="单次请求超时时间">⏱${ep.timeout}s</span><span title="失败后最大重试次数">🔁${ep.max_retries}次</span><span title="请求失败后的冷却惩罚时间">❄️${ep.cooldown_minutes}分</span><span title="累计成功响应次数">📞${ep.total_calls}次</span><span title="最后一次成功响应时间">🕐${last}</span>
       </div>
       ${ep.last_error?`<div class="ep-error">⚠ ${esc(ep.last_error)}</div>`:''}
     </div>`;
@@ -1068,12 +1258,13 @@ async function saveEndpoint(){
 }
 
 async function batchAddEndpoints(){
+  const fn=document.getElementById('fName').value.trim();
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
   const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||1,cd=parseInt(document.getElementById('fCooldown').value)||5;
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('选择模型','error');return;}
   const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
-  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,start_priority:sp}});
+  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,start_priority:sp}});
   if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
@@ -1081,6 +1272,136 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 function timeAgo(ts){if(!ts)return'—';const s=Math.floor(Date.now()/1000-ts);if(s<60)return s+'s前';if(s<3600)return Math.floor(s/60)+'m前';if(s<86400)return Math.floor(s/3600)+'h前';return Math.floor(s/86400)+'d前';}
 function fmtTime(s){if(s<=0)return'';if(s<60)return s+'s';const m=Math.floor(s/60);return(s%60)?`${m}m${s%60}s`:`${m}m`;}
 function toast(msg,type){const el=document.getElementById('toast');el.textContent=msg;el.className='toast toast-'+type+' show';setTimeout(()=>el.classList.remove('show'),2500);}
+
+function closeStatsModal(){document.getElementById('statsModal').classList.remove('show');}
+function fmtNum(n) {
+    if (!n) return '0';
+    if (n >= 100000000) return (n / 100000000).toFixed(2).replace(/\.00$/, '') + ' 亿';
+    if (n >= 10000) return (n / 10000).toFixed(2).replace(/\.00$/, '') + ' 万';
+    return n.toLocaleString();
+}
+
+function drawSVGChart(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!data || data.length === 0) {
+        container.innerHTML = '<div class="empty">暂无趋势数据</div>';
+        return;
+    }
+    const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
+    const padding = 10;
+    const w = container.clientWidth || 800;
+    const h = 140;
+    
+    let pts = [];
+    data.forEach((d, i) => {
+        const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
+        const y = h - padding - (d.tokens / maxVal) * (h - 2 * padding);
+        pts.push(`${x},${y}`);
+    });
+    
+    container.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
+            <defs>
+                <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="rgba(124, 109, 240, 0.4)"/>
+                    <stop offset="100%" stop-color="rgba(124, 109, 240, 0.0)"/>
+                </linearGradient>
+            </defs>
+            <polygon points="${pts[0].split(',')[0]},${h} ${pts.join(' ')} ${pts[pts.length-1].split(',')[0]},${h}" fill="url(#chartGrad)"/>
+            <polyline points="${pts.join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            ${data.map((d, i) => {
+                const [x, y] = pts[i].split(',');
+                return `<circle cx="${x}" cy="${y}" r="4" fill="var(--bg)" stroke="var(--accent)" stroke-width="2" class="chart-point" data-idx="${i}" style="cursor:pointer; transition:r 0.1s;"/>`;
+            }).join('')}
+        </svg>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:11px; box-shadow:var(--shadow); pointer-events:none; z-index:10; white-space:nowrap;"></div>
+    `;
+    
+    const tt = document.getElementById(`${containerId}_tt`);
+    container.querySelectorAll('.chart-point').forEach(c => {
+        c.addEventListener('mouseenter', (e) => {
+            const idx = e.target.getAttribute('data-idx');
+            const d = data[idx];
+            c.setAttribute('r', '6');
+            tt.style.display = 'block';
+            tt.innerHTML = `<div style="color:var(--text-dim);margin-bottom:2px">${d.date}</div><div style="font-weight:600;color:var(--accent-light)">${fmtNum(d.tokens)} Tokens</div>`;
+            
+            let tx = parseFloat(c.getAttribute('cx')) + 10;
+            let ty = parseFloat(c.getAttribute('cy')) - 30;
+            if (tx + 100 > w) tx -= 120;
+            tt.style.left = tx + 'px';
+            tt.style.top = ty + 'px';
+        });
+        c.addEventListener('mouseleave', () => {
+            c.setAttribute('r', '4');
+            tt.style.display = 'none';
+        });
+    });
+}
+
+async function openStatsModal(){
+    document.getElementById('statsModal').classList.add('show');
+    document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载中...</div>';
+    document.getElementById('tokenTrendChart').innerHTML = '';
+    document.getElementById('todayModelsTable').innerHTML = '';
+    document.getElementById('monthModelsTable').innerHTML = '';
+    
+    const r = await api('GET', '/api/token-stats');
+    if(!r.today && r.today !== 0) {
+        document.getElementById('tokenStatsOverview').innerHTML = '<div class="empty">加载失败</div>';
+        return;
+    }
+    
+    document.getElementById('tokenStatsOverview').innerHTML = `
+        <div class="stat-item"><div class="num" style="color:var(--green)">${fmtNum(r.today)}</div><div class="label">今日消耗</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
+    `;
+    
+    setTimeout(() => drawSVGChart('tokenTrendChart', r.trend_14d), 50);
+    
+    const renderTbl = (data) => data && data.length ? data.map(d => `
+        <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+            <td style="padding: 6px;"><code>${esc(d.model)}</code></td>
+            <td style="padding: 6px; text-align:right; font-family: monospace;">${fmtNum(d.tokens)}</td>
+        </tr>
+    `).join('') : '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+    
+    document.getElementById('todayModelsTable').innerHTML = renderTbl(r.today_models);
+    document.getElementById('monthModelsTable').innerHTML = renderTbl(r.month_models);
+}
+
+let logAutoScroll = true;
+const logContainer = document.getElementById('logContainer');
+if (logContainer) {
+    logContainer.addEventListener('scroll', () => {
+        logAutoScroll = logContainer.scrollHeight - logContainer.clientHeight <= logContainer.scrollTop + 20;
+    });
+}
+function addLogLine(entry) {
+    if (!logContainer) return;
+    const d = document.createElement('div');
+    d.className = 'log-line';
+    d.innerHTML = `<span class="log-time">[${entry.time}]</span> <span class="log-${entry.level}">[${entry.level}]</span> <span class="log-msg">${esc(entry.msg)}</span>`;
+    logContainer.appendChild(d);
+    if (logContainer.children.length > 300) logContainer.removeChild(logContainer.firstChild);
+    if (logAutoScroll) logContainer.scrollTop = logContainer.scrollHeight;
+}
+let _lastLogId = 0;
+async function pollLogs() {
+    try {
+        const logs = await api('GET', '/api/logs?since=' + _lastLogId);
+        if (logs && logs.length > 0) {
+            for (let entry of logs) {
+                addLogLine(entry);
+                _lastLogId = Math.max(_lastLogId, entry.id);
+            }
+        }
+    } catch(err){}
+    setTimeout(pollLogs, 2000);
+}
+pollLogs();
 
 refresh();setInterval(refresh,3000);
 </script>
@@ -1128,7 +1449,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(GUI_HTML)
         elif self.path.startswith("/api/"):
             res = api_handler("GET", self.path, {})
-            self._send_json(res[0], res[1])
+            if len(res) == 3 and res[2] is True:
+                code, stream_gen = res[0], res[1]
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+                    for chunk in stream_gen:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except ConnectionError:
+                    pass
+            else:
+                self._send_json(res[0], res[1])
         else:
             self._send_json(404, {"error": "Not found"})
 
@@ -1165,7 +1500,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     port = 5100
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"\n  ⚡ API Pool 管理面板已启动")
     print(f"  🌐 管理面板访问: http://localhost:{port}")
     print(f"  🔗 客户端 Base URL: http://localhost:{port}/v1")
