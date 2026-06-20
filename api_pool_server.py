@@ -162,6 +162,7 @@ class Endpoint:
     daily_limit: int = 0
     rpm_limit: int = 0
     use_proxy: bool = True
+    protocol: str = "openai"
     extra_headers: dict = field(default_factory=dict)
 
     _fail_count: int = field(default=0, repr=False)
@@ -258,6 +259,7 @@ class APIPool:
             "today_used": ep._today_used,
             "rpm_limit": ep.rpm_limit,
             "use_proxy": ep.use_proxy,
+            "protocol": ep.protocol,
             "is_rpm_limited": self._is_rpm_limited(ep),
             "fail_count": ep._fail_count,
             "last_error": ep._last_error,
@@ -499,8 +501,33 @@ class APIPool:
         raise AllEndpointsFailed(errors)
 
     def _try_endpoint(self, ep, payload, timeout):
-        url = ep.base_url.rstrip("/") + "/chat/completions"
-        data = json.dumps(payload).encode("utf-8")
+        is_anthropic = (getattr(ep, "protocol", "openai") == "anthropic")
+        
+        if is_anthropic:
+            url = ep.base_url.rstrip("/") + "/messages"
+            anthropic_payload = {
+                "model": payload.get("model", ep.model),
+                "max_tokens": payload.get("max_tokens", 4096),
+            }
+            if "temperature" in payload: anthropic_payload["temperature"] = payload["temperature"]
+            if "top_p" in payload: anthropic_payload["top_p"] = payload["top_p"]
+            if "stream" in payload: anthropic_payload["stream"] = payload["stream"]
+            
+            sys_prompt = ""
+            messages = []
+            for m in payload.get("messages", []):
+                if m.get("role") == "system":
+                    sys_prompt += m.get("content", "") + "\n"
+                else:
+                    messages.append(m)
+            if sys_prompt:
+                anthropic_payload["system"] = sys_prompt.strip()
+            anthropic_payload["messages"] = messages
+            data = json.dumps(anthropic_payload).encode("utf-8")
+        else:
+            url = ep.base_url.rstrip("/") + "/chat/completions"
+            data = json.dumps(payload).encode("utf-8")
+            
         is_stream = payload.get("stream", False)
         
         for attempt in range(ep.max_retries + 1):
@@ -510,11 +537,17 @@ class APIPool:
                     
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Content-Type", "application/json")
-            req.add_header("Authorization", f"Bearer {ep.api_key}")
+            if is_anthropic:
+                req.add_header("x-api-key", ep.api_key)
+                req.add_header("anthropic-version", "2023-06-01")
+            else:
+                req.add_header("Authorization", f"Bearer {ep.api_key}")
+                
             for k, v in ep.extra_headers.items():
                 req.add_header(k, v)
+                
             try:
-                if not ep.use_proxy:
+                if getattr(ep, "use_proxy", True) is False:
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     resp = opener.open(req, timeout=timeout)
                 else:
@@ -524,17 +557,42 @@ class APIPool:
                     def stream_generator():
                         try:
                             for line in resp:
-                                if line.strip() and line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
-                                    try:
-                                        chunk = json.loads(line[6:].decode("utf-8"))
+                                if not line.strip() or not line.startswith(b"data: "):
+                                    continue
+                                if line.startswith(b"data: [DONE]"):
+                                    yield line
+                                    continue
+                                    
+                                try:
+                                    chunk = json.loads(line[6:].decode("utf-8"))
+                                    if is_anthropic:
+                                        ctype = chunk.get("type")
+                                        if ctype == "content_block_delta":
+                                            text = chunk.get("delta", {}).get("text", "")
+                                            if text:
+                                                o_chunk = {"choices": [{"delta": {"content": text}}]}
+                                                yield b"data: " + json.dumps(o_chunk).encode("utf-8") + b"\n\n"
+                                        elif ctype == "message_stop":
+                                            yield b"data: [DONE]\n\n"
+                                        elif ctype == "message_delta" and "usage" in chunk:
+                                            u = chunk["usage"]
+                                            tot = u.get("output_tokens", 0)
+                                            token_tracker.add_usage(ep.name, ep.model, 0, tot, tot)
+                                            ep._today_used += tot
+                                        elif ctype == "message_start" and "message" in chunk and "usage" in chunk["message"]:
+                                            u = chunk["message"]["usage"]
+                                            tot = u.get("input_tokens", 0)
+                                            token_tracker.add_usage(ep.name, ep.model, tot, 0, tot)
+                                            ep._today_used += tot
+                                    else:
                                         if "usage" in chunk and chunk["usage"]:
                                             u = chunk["usage"]
                                             tot = u.get("total_tokens", 0)
                                             token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
                                             ep._today_used += tot
-                                    except Exception:
-                                        pass
-                                yield line
+                                        yield line
+                                except Exception:
+                                    if not is_anthropic: yield line
                         except Exception:
                             pass
                         finally:
@@ -542,12 +600,24 @@ class APIPool:
                     return stream_generator(), ""
                 else:
                     body = json.loads(resp.read().decode("utf-8"))
-                    u = body.get("usage", {})
-                    if u:
-                        tot = u.get("total_tokens", 0)
-                        token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
-                        ep._today_used += tot
-                    return body["choices"][0]["message"]["content"].strip(), ""
+                    if is_anthropic:
+                        reply = ""
+                        for c in body.get("content", []):
+                            if c.get("type") == "text": reply += c.get("text", "")
+                        u = body.get("usage", {})
+                        if u:
+                            tot = u.get("input_tokens", 0) + u.get("output_tokens", 0)
+                            token_tracker.add_usage(ep.name, ep.model, u.get("input_tokens", 0), u.get("output_tokens", 0), tot)
+                            ep._today_used += tot
+                        return reply.strip(), ""
+                    else:
+                        u = body.get("usage", {})
+                        if u:
+                            tot = u.get("total_tokens", 0)
+                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
+                            ep._today_used += tot
+                        return body["choices"][0]["message"]["content"].strip(), ""
+                    
                     
             except urllib.error.HTTPError as e:
                 err_body = ""
@@ -572,7 +642,15 @@ class APIPool:
                 return None, f"未知错误: {e}"
         return None, "重试次数用尽"
 
-    def fetch_models(self, base_url, api_key, timeout=10, use_proxy=True):
+    def fetch_models(self, base_url, api_key, timeout=10, use_proxy=True, protocol="openai"):
+        if protocol == "anthropic":
+            return [
+                {"id": "claude-3-5-sonnet-20240620", "description": "Anthropic Claude 3.5 Sonnet", "modality": "unknown", "modality_source": "none"},
+                {"id": "claude-3-opus-20240229", "description": "Anthropic Claude 3 Opus", "modality": "unknown", "modality_source": "none"},
+                {"id": "claude-3-sonnet-20240229", "description": "Anthropic Claude 3 Sonnet", "modality": "unknown", "modality_source": "none"},
+                {"id": "claude-3-haiku-20240307", "description": "Anthropic Claude 3 Haiku", "modality": "unknown", "modality_source": "none"}
+            ]
+            
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Authorization", f"Bearer {api_key}")
@@ -599,72 +677,36 @@ class APIPool:
             models.sort(key=lambda x: x["id"])
             return models
 
-    def test_vision(self, base_url, api_key, model, timeout=15, use_proxy=True):
+    def test_vision(self, base_url, api_key, model, timeout=15, use_proxy=True, protocol="openai"):
+        ep = Endpoint(name="test_vision", base_url=base_url, api_key=api_key, model=model, max_retries=0, use_proxy=use_proxy, protocol=protocol)
         tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
-        url = base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "describe this image in 3 words"}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_png}"}}]}],
             "max_tokens": 10,
         }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {api_key}")
         t0 = time.time()
-        try:
-            if not use_proxy:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                resp = opener.open(req, timeout=timeout)
-            else:
-                resp = urllib.request.urlopen(req, timeout=timeout)
-                
-            with resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                latency = int((time.time() - t0) * 1000)
-                reply = body["choices"][0]["message"]["content"].strip()
-                return {"ok": True, "supports_vision": True, "latency_ms": latency, "reply": reply, "error": ""}
-        except urllib.error.HTTPError as e:
-            latency = int((time.time() - t0) * 1000)
-            err_body = ""
-            try: err_body = e.read().decode("utf-8", errors="ignore")[:200]
-            except Exception: pass
-            unsupported = e.code == 400 or "image" in err_body.lower() or "vision" in err_body.lower() or "content" in err_body.lower()
-            return {"ok": True, "supports_vision": not unsupported, "latency_ms": latency, "reply": "", "error": f"HTTP {e.code}: {err_body}"}
-        except Exception as e:
-            latency = int((time.time() - t0) * 1000)
-            return {"ok": False, "supports_vision": False, "latency_ms": latency, "reply": "", "error": str(e)}
+        reply, err = self._try_endpoint(ep, payload, timeout)
+        latency = int((time.time() - t0) * 1000)
+        
+        if reply is not None:
+            return {"ok": True, "supports_vision": True, "latency_ms": latency, "reply": reply, "error": ""}
+        else:
+            unsupported = "image" in err.lower() or "vision" in err.lower() or "content" in err.lower() or "400" in err
+            return {"ok": not unsupported, "supports_vision": not unsupported, "latency_ms": latency, "reply": "", "error": err}
 
-    def test_model_latency(self, base_url, api_key, model, timeout=15, use_proxy=True):
-        url = base_url.rstrip("/") + "/chat/completions"
+    def test_model_latency(self, base_url, api_key, model, timeout=15, use_proxy=True, protocol="openai"):
+        ep = Endpoint(name="test_latency", base_url=base_url, api_key=api_key, model=model, max_retries=0, use_proxy=use_proxy, protocol=protocol)
         payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {api_key}")
         t0 = time.time()
-        try:
-            if not use_proxy:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                resp = opener.open(req, timeout=timeout)
-            else:
-                resp = urllib.request.urlopen(req, timeout=timeout)
-                
-            with resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                latency = int((time.time() - t0) * 1000)
-                reply = body["choices"][0]["message"]["content"].strip()
-                status = "ok" if latency <= LATENCY_OK_MAX else ("slow" if latency <= LATENCY_SLOW_MAX else "bad")
-                return {"ok": True, "status": status, "latency_ms": latency, "reply": reply, "error": ""}
-        except urllib.error.HTTPError as e:
-            latency = int((time.time() - t0) * 1000)
-            err_body = ""
-            try: err_body = e.read().decode("utf-8", errors="ignore")[:150]
-            except Exception: pass
-            return {"ok": False, "status": "bad", "latency_ms": latency, "reply": "", "error": f"HTTP {e.code}: {err_body}"}
-        except Exception as e:
-            latency = int((time.time() - t0) * 1000)
-            return {"ok": False, "status": "bad", "latency_ms": latency, "reply": "", "error": str(e)}
+        reply, err = self._try_endpoint(ep, payload, timeout)
+        latency = int((time.time() - t0) * 1000)
+        
+        if reply is not None:
+            status = "ok" if latency <= LATENCY_OK_MAX else ("slow" if latency <= LATENCY_SLOW_MAX else "bad")
+            return {"ok": True, "status": status, "latency_ms": latency, "reply": reply, "error": ""}
+        else:
+            return {"ok": False, "status": "bad", "latency_ms": latency, "reply": "", "error": err}
 
 CONFIG_FILE = "api_config.json"
 
@@ -754,6 +796,7 @@ def api_handler(method, path, body):
                 "max_retries": item.get("max_retries", base.get("max_retries", 1)), "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
                 "daily_limit": item.get("daily_limit", base.get("daily_limit", 0)), "rpm_limit": item.get("rpm_limit", base.get("rpm_limit", 0)),
                 "use_proxy": item.get("use_proxy", base.get("use_proxy", True)),
+                "protocol": item.get("protocol", base.get("protocol", "openai")),
                 "enabled": item.get("enabled", True),
             }
             if ep["model"]: pool.add_endpoint(ep); added += 1
@@ -772,7 +815,7 @@ def api_handler(method, path, body):
         base_url = body.get("base_url", ""); api_key = body.get("api_key", "")
         if not base_url or not api_key: return 400, {"error": "需要 base_url 和 api_key"}, False
         try:
-            models = pool.fetch_models(base_url, api_key, use_proxy=body.get("use_proxy", True))
+            models = pool.fetch_models(base_url, api_key, use_proxy=body.get("use_proxy", True), protocol=body.get("protocol", "openai"))
             return 200, {"ok": True, "models": models, "count": len(models)}, False
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -780,15 +823,15 @@ def api_handler(method, path, body):
             except Exception: pass
             return 200, {"ok": False, "error": f"HTTP {e.code}: {err_body}"}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
-    if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True)), False
-    if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True)), False
+    if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True), protocol=body.get("protocol", "openai")), False
+    if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True), protocol=body.get("protocol", "openai")), False
     if method == "POST" and cp == "/api/test":
         name = body.get("name", ""); test_msg = body.get("message", "你好"); target_ep = None
         for ep in pool.list_endpoints():
             if ep["name"] == name: target_ep = ep; break
         if not target_ep: return 404, {"error": f"端点 {name} 不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
-        test_pool.add_endpoint({"name": name, "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True})
+        test_pool.add_endpoint({"name": name, "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
         try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/test-pool":
@@ -800,7 +843,7 @@ def api_handler(method, path, body):
     return 404, {"error": "Not found"}, False
 
 def _sync_to_config():
-    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"], "daily_limit": ep.get("daily_limit", 0), "rpm_limit": ep.get("rpm_limit", 0), "use_proxy": ep.get("use_proxy", True)} for ep in pool.list_endpoints()])
+    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"], "daily_limit": ep.get("daily_limit", 0), "rpm_limit": ep.get("rpm_limit", 0), "use_proxy": ep.get("use_proxy", True), "protocol": ep.get("protocol", "openai")} for ep in pool.list_endpoints()])
 
 
 GUI_HTML = r"""<!DOCTYPE html>
@@ -1060,9 +1103,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
       <div class="form-group"><label>启用</label><select id="fEnabled"><option value="true">是</option><option value="false">否</option></select></div>
       <div class="form-group"><label title="达到额度后挂起，0为不限制">每日额度 (0不限)</label><input type="number" id="fDailyLimit" value="0" min="0"></div>
     </div>
-    <div class="form-row">
-      <div class="form-group"><label title="每分钟最高请求次数，超限自动切换，0为不限制">并发限速 (RPM，0不限)</label><input type="number" id="fRpmLimit" value="0" min="0"></div>
+    <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
+      <div class="form-group"><label title="每分钟最高请求次数，超限自动切换，0为不限制">并发 (0不限)</label><input type="number" id="fRpmLimit" value="0" min="0"></div>
       <div class="form-group"><label title="是否使用系统代理 (如v2ray)。本地或直连接口请选择否。">代理设置</label><select id="fProxy"><option value="true">随系统</option><option value="false">强制直连</option></select></div>
+      <div class="form-group"><label title="底层协议类型">协议类型</label><select id="fProtocol"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></div>
     </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
@@ -1167,6 +1211,8 @@ function renderEndpoints(eps){
     if(ep.daily_limit>0&&ep.today_used>=ep.daily_limit)cls+=' in-cooldown';
     if(ep.is_rpm_limited)cls+=' in-cooldown';
     let b=`<span class="badge badge-priority">#${ep.priority}</span>${hBadge(ep.health,ep.health_latency_ms)}`;
+    if(ep.protocol==='anthropic')b+=`<span class="badge" style="background:rgba(217,119,87,0.2);color:#ff9e7a;border:1px solid rgba(217,119,87,0.3)" title="Anthropic 原生协议翻译">🧠Anthropic</span>`;
+    else b+=`<span class="badge badge-priority" style="background:rgba(16,163,127,0.2);color:#2ecc71" title="OpenAI 兼容协议">🟢OpenAI</span>`;
     if(ep.is_current)b+='<span class="badge badge-current">● 当前</span>';
     if(!ep.enabled)b+='<span class="badge badge-disabled">禁用</span>';
     if(ep.is_rpm_limited)b+=`<span class="badge badge-cooldown" title="每分钟并发已满，限流降级中">🚧限流中</span>`;
@@ -1229,10 +1275,10 @@ async function resetPool(){await api('POST','/api/reset');toast('已重置','suc
 function checkFetchBtn(){const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();document.getElementById('fetchModelsBtn').disabled=!(u&&k);}
 async function fetchModels(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const up=document.getElementById('fProxy').value==='true';
+  const up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   const b=document.getElementById('fetchModelsBtn');b.disabled=true;b.innerHTML='⏳';
-  try{const r=await api('POST','/api/fetch-models',{base_url:u,api_key:k,use_proxy:up});
+  try{const r=await api('POST','/api/fetch-models',{base_url:u,api_key:k,use_proxy:up,protocol:pt});
     if(r.ok&&r.models?.length){allModels=r.models;selectedModels=new Set();latencyResults={};visionResults={};modelPage=1;renderModelBrowser();toast(`${r.count} 个模型`,'success');}
     else{document.getElementById('modelBrowser').innerHTML=`<div style="padding:10px;color:var(--red);font-size:12px">❌ ${esc(r.error||'无模型')}</div>`;document.getElementById('modelBrowser').style.display='block';}
   }catch(e){toast('请求失败','error');}
@@ -1315,29 +1361,29 @@ function updateBatchBar(){
 
 async function testSelectedLatency(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const up=document.getElementById('fProxy').value==='true';
+  const up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('勾选模型','error');return;}
   const ms=[...selectedModels];toast(`测试 ${ms.length} 个...`,'info');
-  for(const mid of ms){latencyResults[mid]={status:'bad',latency_ms:0};filterModels();try{latencyResults[mid]=await api('POST','/api/test-model',{base_url:u,api_key:k,model:mid,use_proxy:up});}catch(e){latencyResults[mid]={status:'bad',latency_ms:0};}filterModels();}
+  for(const mid of ms){latencyResults[mid]={status:'bad',latency_ms:0};filterModels();try{latencyResults[mid]=await api('POST','/api/test-model',{base_url:u,api_key:k,model:mid,use_proxy:up,protocol:pt});}catch(e){latencyResults[mid]={status:'bad',latency_ms:0};}filterModels();}
   toast(`✅${Object.values(latencyResults).filter(r=>r.ok).length}/${ms.length}`,'success');
 }
 
 async function testSelectedVision(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const up=document.getElementById('fProxy').value==='true';
+  const up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('勾选模型','error');return;}
   const ms=[...selectedModels];toast(`检测 ${ms.length} 个多模态...`,'info');
   let vis=0;
-  for(const mid of ms){visionResults[mid]={supports_vision:false};filterModels();try{const r=await api('POST','/api/test-vision',{base_url:u,api_key:k,model:mid,use_proxy:up});visionResults[mid]=r;if(r.supports_vision)vis++;}catch(e){visionResults[mid]={supports_vision:false};}filterModels();}
+  for(const mid of ms){visionResults[mid]={supports_vision:false};filterModels();try{const r=await api('POST','/api/test-vision',{base_url:u,api_key:k,model:mid,use_proxy:up,protocol:pt});visionResults[mid]=r;if(r.supports_vision)vis++;}catch(e){visionResults[mid]={supports_vision:false};}filterModels();}
   toast(`多模态: ${vis}/${ms.length} 支持`,'success');
 }
 
 function openAddModal(){
   document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
   ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';
+  document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';
   document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
   document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
   allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
@@ -1347,7 +1393,7 @@ function editEndpoint(name){
   api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.name===name);if(!ep)return;
     document.getElementById('editName').value=name;document.getElementById('modalTitle').textContent='编辑端点';
     document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
-    document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);
+    document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';
     document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
     allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
   });
@@ -1356,7 +1402,7 @@ function closeModal(){document.getElementById('modal').classList.remove('show');
 
 async function saveEndpoint(){
   const en=document.getElementById('editName').value;
-  const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true'};
+  const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai'};
   if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
   if(!d.model){toast('选择模型','error');return;}
   if(en){await api('PUT',`/api/endpoints/${encodeURIComponent(en)}`,d);toast('已更新','success');}
@@ -1367,11 +1413,11 @@ async function saveEndpoint(){
 async function batchAddEndpoints(){
   const fn=document.getElementById('fName').value.trim();
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||0,cd=parseInt(document.getElementById('fCooldown').value)||5,dl=parseInt(document.getElementById('fDailyLimit').value)||0,rl=parseInt(document.getElementById('fRpmLimit').value)||0,up=document.getElementById('fProxy').value==='true';
+  const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||0,cd=parseInt(document.getElementById('fCooldown').value)||5,dl=parseInt(document.getElementById('fDailyLimit').value)||0,rl=parseInt(document.getElementById('fRpmLimit').value)||0,up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
   if(!u||!k){toast('填写 URL 和 Key','error');return;}
   if(!selectedModels.size){toast('选择模型','error');return;}
   const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
-  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,start_priority:sp}});
+  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,protocol:pt,start_priority:sp}});
   if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
