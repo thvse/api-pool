@@ -314,39 +314,19 @@ class APIPool:
             self._current_idx = 0
 
     def _check_one_health(self, ep):
-        url = ep.base_url.rstrip("/") + "/chat/completions"
         payload = {"model": ep.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 3}
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {ep.api_key}")
         t0 = time.time()
-        try:
-            if not ep.use_proxy:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                resp = opener.open(req, timeout=10)
+        reply, err = self._try_endpoint(ep, payload, timeout=10)
+        latency = int((time.time() - t0) * 1000)
+        if reply is not None:
+            if latency <= LATENCY_OK_MAX:
+                return ep.name, "ok", latency, ""
+            elif latency <= LATENCY_SLOW_MAX:
+                return ep.name, "slow", latency, ""
             else:
-                resp = urllib.request.urlopen(req, timeout=10)
-            with resp:
-                resp.read()
-                latency = int((time.time() - t0) * 1000)
-                if latency <= LATENCY_OK_MAX:
-                    return ep.name, "ok", latency, ""
-                elif latency <= LATENCY_SLOW_MAX:
-                    return ep.name, "slow", latency, ""
-                else:
-                    return ep.name, "bad", latency, f"延迟过高: {latency}ms"
-        except urllib.error.HTTPError as e:
-            latency = int((time.time() - t0) * 1000)
-            err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="ignore")[:100]
-            except Exception:
-                pass
-            return ep.name, "bad", latency, f"HTTP {e.code}: {err_body}"
-        except Exception as e:
-            latency = int((time.time() - t0) * 1000)
-            return ep.name, "bad", latency, str(e)[:100]
+                return ep.name, "bad", latency, f"延迟过高: {latency}ms"
+        else:
+            return ep.name, "bad", latency, err[:100] if err else "未知错误"
 
     def check_all_health(self):
         with self._lock:
