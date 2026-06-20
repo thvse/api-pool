@@ -642,7 +642,8 @@ class APIPool:
                                 cached = u["prompt_tokens_details"].get("cached_tokens", 0)
                             token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot, cached)
                             ep._today_used += tot
-                        return body["choices"][0]["message"]["content"].strip(), ""
+                        content = body["choices"][0]["message"].get("content")
+                        return (content.strip() if content else ""), ""
                     
                     
             except urllib.error.HTTPError as e:
