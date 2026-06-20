@@ -72,14 +72,18 @@ class TokenTracker:
                 conn.execute("ALTER TABLE token_usage ADD COLUMN endpoint_name TEXT DEFAULT ''")
             except Exception:
                 pass
+            try:
+                conn.execute("ALTER TABLE token_usage ADD COLUMN cached_tokens INTEGER DEFAULT 0")
+            except Exception:
+                pass
 
-    def add_usage(self, endpoint_name, model, prompt_tokens, completion_tokens, total_tokens):
+    def add_usage(self, endpoint_name, model, prompt_tokens, completion_tokens, total_tokens, cached_tokens=0):
         def _do_insert():
             try:
                 with sqlite3.connect(self.db_path, timeout=5) as conn:
                     conn.execute(
-                        "INSERT INTO token_usage (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)",
-                        (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens)
+                        "INSERT INTO token_usage (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens, cached_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+                        (endpoint_name, model, prompt_tokens, completion_tokens, total_tokens, cached_tokens)
                     )
             except Exception as e:
                 sys_log(f"记录 token 消耗失败: {e}", "WARN")
@@ -97,14 +101,23 @@ class TokenTracker:
     def get_stats(self):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', 'localtime')")
-            today = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= date('now', 'localtime')")
+            today_row = cursor.fetchone()
+            today = today_row[0] or 0
+            today_cached = today_row[1] or 0
+            today_prompt = today_row[2] or 0
+            today_cache_hit_rate = round(today_cached / today_prompt * 100, 1) if today_prompt > 0 else 0
+            
             cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-2 days', 'localtime')")
             last_3_days = cursor.fetchone()[0] or 0
             cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-6 days', 'localtime')")
             last_7_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= date('now', '-29 days', 'localtime')")
-            last_30_days = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= date('now', '-29 days', 'localtime')")
+            month_row = cursor.fetchone()
+            last_30_days = month_row[0] or 0
+            month_cached = month_row[1] or 0
+            month_prompt = month_row[2] or 0
+            month_cache_hit_rate = round(month_cached / month_prompt * 100, 1) if month_prompt > 0 else 0
             
             cursor.execute("""
                 SELECT date(timestamp, 'localtime') as d, SUM(total_tokens)
@@ -120,26 +133,33 @@ class TokenTracker:
                 trend_14d.append({"date": d_str, "tokens": raw_trend.get(d_str, 0)})
                 
             cursor.execute("""
-                SELECT model, SUM(total_tokens)
+                SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
                 WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-                GROUP BY model
+                GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """)
-            today_models = [{"model": r[0], "tokens": r[1]} for r in cursor.fetchall()]
+            today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
             
             cursor.execute("""
-                SELECT model, SUM(total_tokens)
+                SELECT endpoint_name, model, SUM(total_tokens)
                 FROM token_usage
                 WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime')
-                GROUP BY model
+                GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """)
-            month_models = [{"model": r[0], "tokens": r[1]} for r in cursor.fetchall()]
+            month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2]} for r in cursor.fetchall()]
 
             return {
-                "today": today, "last_3_days": last_3_days, "last_7_days": last_7_days, "last_30_days": last_30_days,
-                "trend_14d": trend_14d, "today_models": today_models, "month_models": month_models
+                "today": today,
+                "today_cache_hit_rate": today_cache_hit_rate,
+                "last_3_days": last_3_days,
+                "last_7_days": last_7_days,
+                "last_30_days": last_30_days,
+                "month_cache_hit_rate": month_cache_hit_rate,
+                "trend_14d": trend_14d,
+                "today_endpoints": today_endpoints,
+                "month_endpoints": month_endpoints
             }
 
 token_tracker = TokenTracker()
@@ -539,6 +559,7 @@ class APIPool:
                         final_prompt_tokens = 0
                         final_completion_tokens = 0
                         final_total_tokens = 0
+                        final_cached_tokens = 0
                         has_usage = False
                         try:
                             for line in resp:
@@ -572,6 +593,7 @@ class APIPool:
                                             u = chunk["message"]["usage"]
                                             final_prompt_tokens += u.get("input_tokens", 0)
                                             final_total_tokens += u.get("input_tokens", 0)
+                                            final_cached_tokens += u.get("cache_read_input_tokens", 0)
                                             has_usage = True
                                     except Exception:
                                         pass
@@ -585,6 +607,8 @@ class APIPool:
                                                 final_prompt_tokens = u.get("prompt_tokens", 0)
                                                 final_completion_tokens = u.get("completion_tokens", 0)
                                                 final_total_tokens = u.get("total_tokens", 0)
+                                                if "prompt_tokens_details" in u and isinstance(u["prompt_tokens_details"], dict):
+                                                    final_cached_tokens = u["prompt_tokens_details"].get("cached_tokens", 0)
                                                 has_usage = True
                                         except Exception:
                                             pass
@@ -592,7 +616,7 @@ class APIPool:
                             pass
                         finally:
                             if has_usage:
-                                token_tracker.add_usage(ep.name, ep.model, final_prompt_tokens, final_completion_tokens, final_total_tokens)
+                                token_tracker.add_usage(ep.name, ep.model, final_prompt_tokens, final_completion_tokens, final_total_tokens, final_cached_tokens)
                                 ep._today_used += final_total_tokens
                             resp.close()
                     return stream_generator(), ""
@@ -605,14 +629,18 @@ class APIPool:
                         u = body.get("usage", {})
                         if u:
                             tot = u.get("input_tokens", 0) + u.get("output_tokens", 0)
-                            token_tracker.add_usage(ep.name, ep.model, u.get("input_tokens", 0), u.get("output_tokens", 0), tot)
+                            cached = u.get("cache_read_input_tokens", 0)
+                            token_tracker.add_usage(ep.name, ep.model, u.get("input_tokens", 0), u.get("output_tokens", 0), tot, cached)
                             ep._today_used += tot
                         return reply.strip(), ""
                     else:
                         u = body.get("usage", {})
                         if u:
                             tot = u.get("total_tokens", 0)
-                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
+                            cached = 0
+                            if "prompt_tokens_details" in u and isinstance(u["prompt_tokens_details"], dict):
+                                cached = u["prompt_tokens_details"].get("cached_tokens", 0)
+                            token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot, cached)
                             ep._today_used += tot
                         return body["choices"][0]["message"]["content"].strip(), ""
                     
@@ -1508,19 +1536,21 @@ async function openStatsModal(){
         <div class="stat-item"><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
         <div class="stat-item"><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
         <div class="stat-item"><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
     `;
     
     setTimeout(() => drawSVGChart('tokenTrendChart', r.trend_14d), 50);
     
     const renderTbl = (data) => data && data.length ? data.map(d => `
         <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
-            <td style="padding: 6px;"><code>${esc(d.model)}</code></td>
+            <td style="padding: 6px;"><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></td>
             <td style="padding: 6px; text-align:right; font-family: monospace;">${fmtNum(d.tokens)}</td>
         </tr>
     `).join('') : '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
     
-    document.getElementById('todayModelsTable').innerHTML = renderTbl(r.today_models);
-    document.getElementById('monthModelsTable').innerHTML = renderTbl(r.month_models);
+    document.getElementById('todayModelsTable').innerHTML = renderTbl(r.today_endpoints);
+    document.getElementById('monthModelsTable').innerHTML = renderTbl(r.month_endpoints);
 }
 
 let logAutoScroll = true;
