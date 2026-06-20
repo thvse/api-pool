@@ -101,22 +101,24 @@ class TokenTracker:
     def get_stats(self):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')")
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc')")
             today_row = cursor.fetchone()
             today = today_row[0] or 0
             today_cached = today_row[1] or 0
             today_prompt = today_row[2] or 0
+            today_calls = today_row[3] or 0
             today_cache_hit_rate = round(today_cached / today_prompt * 100, 1) if today_prompt > 0 else 0
             
             cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-2 days', 'localtime'), 'utc')")
             last_3_days = cursor.fetchone()[0] or 0
             cursor.execute("SELECT SUM(total_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-6 days', 'localtime'), 'utc')")
             last_7_days = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens) FROM token_usage WHERE timestamp >= datetime(date('now', '-29 days', 'localtime'), 'utc')")
+            cursor.execute("SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', '-29 days', 'localtime'), 'utc')")
             month_row = cursor.fetchone()
             last_30_days = month_row[0] or 0
             month_cached = month_row[1] or 0
             month_prompt = month_row[2] or 0
+            month_calls = month_row[3] or 0
             month_cache_hit_rate = round(month_cached / month_prompt * 100, 1) if month_prompt > 0 else 0
             
             cursor.execute("""
@@ -164,10 +166,12 @@ class TokenTracker:
 
             return {
                 "today": today,
+                "today_calls": today_calls,
                 "today_cache_hit_rate": today_cache_hit_rate,
                 "last_3_days": last_3_days,
                 "last_7_days": last_7_days,
                 "last_30_days": last_30_days,
+                "month_calls": month_calls,
                 "month_cache_hit_rate": month_cache_hit_rate,
                 "trend_14d": trend_14d,
                 "trend_today_hourly": trend_today_hourly,
@@ -944,7 +948,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 .card-title{font-size:13px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:7px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px}
 .card-title .icon{font-size:15px}
 
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
 .stat-item{background:rgba(255,255,255,.02);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;transition:transform .2s,box-shadow .2s;box-shadow:0 2px 8px rgba(0,0,0,.1)}
 .stat-item:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.2)}
 .stat-item .num{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
@@ -1561,6 +1565,8 @@ async function openStatsModal(){
         <div class="stat-item"><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
         <div class="stat-item"><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
         <div class="stat-item"><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
+        <div class="stat-item"><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
         <div class="stat-item"><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
         <div class="stat-item"><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
     `;
