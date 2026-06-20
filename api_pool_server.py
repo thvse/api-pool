@@ -999,11 +999,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-u
 .card-title{font-size:13px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:7px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px}
 .card-title .icon{font-size:15px}
 
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
-.stat-item{background:rgba(255,255,255,.02);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;transition:transform .2s,box-shadow .2s;box-shadow:0 2px 8px rgba(0,0,0,.1)}
-.stat-item:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.2)}
-.stat-item .num{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
-.stat-item .label{font-size:10px;color:var(--text-dim);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat-item{position:relative;overflow:hidden;background:linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:20px;text-align:left;transition:transform .3s cubic-bezier(0.2,0.8,0.2,1),box-shadow .3s;box-shadow:0 4px 16px rgba(0,0,0,0.2)}
+.stat-item::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);opacity:0;transition:opacity .3s}
+.stat-item:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,0.3);border-color:rgba(255,255,255,0.12)}
+.stat-item:hover::before{opacity:1}
+.stat-item .stat-icon{position:absolute;right:15px;top:15px;font-size:24px;opacity:0.2;transition:opacity .3s, transform .3s}
+.stat-item:hover .stat-icon{opacity:0.4;transform:scale(1.1)}
+.stat-item .num{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;margin-bottom:4px;letter-spacing:-0.5px}
+.stat-item .label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:600}
+
+.tbl-progress-container{position:relative;width:100%;height:100%;display:flex;align-items:center}
+.tbl-progress-bar{position:absolute;left:0;top:0;bottom:0;background:rgba(94,92,230,0.15);border-radius:4px;z-index:0;transition:width 0.5s cubic-bezier(0.2,0.8,0.2,1)}
+.tbl-content{position:relative;z-index:1;padding:6px;width:100%;display:flex;justify-content:space-between;align-items:center}
+
 
 .filter-bar{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
 .filter-btn{padding:4px 12px;border-radius:16px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-dim);transition:all .12s}
@@ -1555,37 +1564,44 @@ function fmtNum(n) {
 function drawSVGChart(containerId, data) {
     const container = document.getElementById(containerId);
     if (!data || data.length === 0) {
-        container.innerHTML = '<div class="empty">暂无趋势数据</div>';
+        if(container) container.innerHTML = '<div class="empty">暂无趋势数据</div>';
         return;
     }
     const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
-    const padding = 10;
+    const padding = 15;
     const w = container.clientWidth || 800;
-    const h = 140;
+    const h = 180;
     
-    let pts = [];
-    data.forEach((d, i) => {
+    let pts = data.map((d, i) => {
         const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
         const y = h - padding - (d.tokens / maxVal) * (h - 2 * padding);
-        pts.push(`${x},${y}`);
+        return {x, y, d};
     });
+    
+    let pathD = pts.length ? \`M \${pts[0].x},\${pts[0].y}\` : '';
+    for (let i = 1; i < pts.length; i++) {
+        const prev = pts[i-1], curr = pts[i];
+        const cpX = prev.x + (curr.x - prev.x) / 2;
+        pathD += \` C \${cpX},\${prev.y} \${cpX},\${curr.y} \${curr.x},\${curr.y}\`;
+    }
+    const polyD = pts.length ? \`\${pathD} L \${pts[pts.length-1].x},\${h} L \${pts[0].x},\${h} Z\` : '';
     
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
             <defs>
                 <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="rgba(124, 109, 240, 0.4)"/>
+                    <stop offset="0%" stop-color="rgba(124, 109, 240, 0.5)"/>
                     <stop offset="100%" stop-color="rgba(124, 109, 240, 0.0)"/>
                 </linearGradient>
             </defs>
-            <polygon points="${pts[0].split(',')[0]},${h} ${pts.join(' ')} ${pts[pts.length-1].split(',')[0]},${h}" fill="url(#chartGrad)"/>
-            <polyline points="${pts.join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-            ${data.map((d, i) => {
-                const [x, y] = pts[i].split(',');
-                return `<circle cx="${x}" cy="${y}" r="4" fill="var(--bg)" stroke="var(--accent)" stroke-width="2" class="chart-point" data-idx="${i}" style="cursor:pointer; transition:r 0.1s;"/>`;
-            }).join('')}
+            <line x1="0" y1="${padding}" x2="${w}" y2="${padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            <line x1="0" y1="${h-padding}" x2="${w}" y2="${h-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            <path d="${polyD}" fill="url(#chartGrad)"/>
+            <path d="${pathD}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/>
+            ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="var(--accent)" stroke-width="2" class="chart-point" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
         </svg>
-        <div id="${containerId}_tt" style="position:absolute; display:none; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:11px; box-shadow:var(--shadow); pointer-events:none; z-index:10; white-space:nowrap;"></div>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:8px 12px; font-size:11px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:10; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
     `;
     
     const tt = document.getElementById(`${containerId}_tt`);
@@ -1594,17 +1610,20 @@ function drawSVGChart(containerId, data) {
             const idx = e.target.getAttribute('data-idx');
             const d = data[idx];
             c.setAttribute('r', '6');
+            c.style.filter = 'drop-shadow(0 0 4px var(--accent-light))';
             tt.style.display = 'block';
-            tt.innerHTML = `<div style="color:var(--text-dim);margin-bottom:2px">${d.date}</div><div style="font-weight:600;color:var(--accent-light)">${fmtNum(d.tokens)} Tokens</div>`;
+            tt.innerHTML = `<div style="color:var(--text-dim);margin-bottom:4px;font-weight:600">${d.date}</div><div style="font-weight:700;color:var(--accent-light);font-size:13px;">${fmtNum(d.tokens)} <span style="font-size:10px;font-weight:400;color:var(--text-dim)">Tokens</span></div>`;
             
-            let tx = parseFloat(c.getAttribute('cx')) + 10;
-            let ty = parseFloat(c.getAttribute('cy')) - 30;
-            if (tx + 100 > w) tx -= 120;
+            let tx = parseFloat(c.getAttribute('cx')) + 12;
+            let ty = parseFloat(c.getAttribute('cy')) - 35;
+            if (tx + 120 > container.clientWidth) tx = container.clientWidth - 130;
+            if (ty < 0) ty = 10;
             tt.style.left = tx + 'px';
             tt.style.top = ty + 'px';
         });
         c.addEventListener('mouseleave', () => {
             c.setAttribute('r', '4');
+            c.style.filter = 'none';
             tt.style.display = 'none';
         });
     });
@@ -1617,53 +1636,55 @@ function drawCompositionChart(containerId, data) {
         return;
     }
     const maxVal = Math.max(...data.map(d => d.tokens)) || 1;
-    const padding = 10;
+    const padding = 15;
     const w = container.clientWidth || 800;
     const h = 180;
     
     let pts1 = [], pts2 = [], pts3 = [];
     data.forEach((d, i) => {
         const x = padding + (i / Math.max(1, data.length - 1)) * (w - 2 * padding);
-        
         const c1 = d.cached || 0;
         const c2 = c1 + Math.max(0, (d.prompt || 0) - c1);
-        const c3 = Math.max(c2, d.tokens || 0); // ensuring it's the highest
-
-        const y1 = h - padding - (c1 / maxVal) * (h - 2 * padding);
-        const y2 = h - padding - (c2 / maxVal) * (h - 2 * padding);
-        const y3 = h - padding - (c3 / maxVal) * (h - 2 * padding);
-        
-        pts1.push(`${x},${y1}`);
-        pts2.push(`${x},${y2}`);
-        pts3.push(`${x},${y3}`);
+        const c3 = Math.max(c2, d.tokens || 0);
+        pts1.push({x, y: h - padding - (c1 / maxVal) * (h - 2 * padding)});
+        pts2.push({x, y: h - padding - (c2 / maxVal) * (h - 2 * padding)});
+        pts3.push({x, y: h - padding - (c3 / maxVal) * (h - 2 * padding)});
     });
     
-    const poly1 = pts1.length ? `${pts1[0].split(',')[0]},${h} ${pts1.join(' ')} ${pts1[pts1.length-1].split(',')[0]},${h}` : '';
-    const poly2 = pts2.length ? `${pts2[0].split(',')[0]},${h} ${pts2.join(' ')} ${pts2[pts2.length-1].split(',')[0]},${h}` : '';
-    const poly3 = pts3.length ? `${pts3[0].split(',')[0]},${h} ${pts3.join(' ')} ${pts3[pts3.length-1].split(',')[0]},${h}` : '';
+    const genPath = (pts) => {
+        if (!pts.length) return '';
+        let dStr = \`M \${pts[0].x},\${pts[0].y}\`;
+        for (let i = 1; i < pts.length; i++) {
+            const prev = pts[i-1], curr = pts[i];
+            const cpX = prev.x + (curr.x - prev.x) / 2;
+            dStr += \` C \${cpX},\${prev.y} \${cpX},\${curr.y} \${curr.x},\${curr.y}\`;
+        }
+        return dStr;
+    };
+    
+    const path1 = genPath(pts1), path2 = genPath(pts2), path3 = genPath(pts3);
+    const poly1 = pts1.length ? \`\${path1} L \${pts1[pts1.length-1].x},\${h} L \${pts1[0].x},\${h} Z\` : '';
+    const poly2 = pts2.length ? \`\${path2} L \${pts2[pts2.length-1].x},\${h} L \${pts2[0].x},\${h} Z\` : '';
+    const poly3 = pts3.length ? \`\${path3} L \${pts3[pts3.length-1].x},\${h} L \${pts3[0].x},\${h} Z\` : '';
     
     container.innerHTML = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:100%; overflow:visible;">
             <defs>
                 <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(150, 150, 150, 0.4)"/><stop offset="100%" stop-color="rgba(150, 150, 150, 0.0)"/></linearGradient>
                 <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(80, 150, 255, 0.5)"/><stop offset="100%" stop-color="rgba(80, 150, 255, 0.0)"/></linearGradient>
-                <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(0, 200, 100, 0.6)"/><stop offset="100%" stop-color="rgba(0, 200, 100, 0.0)"/></linearGradient>
+                <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(0, 200, 100, 0.5)"/><stop offset="100%" stop-color="rgba(0, 200, 100, 0.0)"/></linearGradient>
             </defs>
-            <polygon points="${poly3}" fill="url(#g3)"/>
-            <polyline points="${pts3.join(' ')}" fill="none" stroke="rgba(150,150,150,0.8)" stroke-width="1.5"/>
+            <line x1="0" y1="${padding}" x2="${w}" y2="${padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            <line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
+            <line x1="0" y1="${h-padding}" x2="${w}" y2="${h-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 4"/>
             
-            <polygon points="${poly2}" fill="url(#g2)"/>
-            <polyline points="${pts2.join(' ')}" fill="none" stroke="rgba(80,150,255,0.8)" stroke-width="1.5"/>
+            <path d="${poly3}" fill="url(#g3)"/><path d="${path3}" fill="none" stroke="rgba(150,150,150,0.8)" stroke-width="2"/>
+            <path d="${poly2}" fill="url(#g2)"/><path d="${path2}" fill="none" stroke="rgba(80,150,255,0.8)" stroke-width="2"/>
+            <path d="${poly1}" fill="url(#g1)"/><path d="${path1}" fill="none" stroke="rgba(0,200,100,0.8)" stroke-width="2"/>
             
-            <polygon points="${poly1}" fill="url(#g1)"/>
-            <polyline points="${pts1.join(' ')}" fill="none" stroke="rgba(0,200,100,0.8)" stroke-width="1.5"/>
-            
-            ${data.map((d, i) => {
-                const [x, y] = pts3[i].split(',');
-                return `<circle cx="${x}" cy="${y}" r="4" fill="var(--bg)" stroke="rgba(150,150,150,0.8)" stroke-width="2" class="chart-point-comp" data-idx="${i}" style="cursor:pointer; transition:r 0.1s;"/>`;
-            }).join('')}
+            ${pts3.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg)" stroke="rgba(200,200,200,0.9)" stroke-width="2" class="chart-point-comp" data-idx="${i}" style="cursor:pointer; transition:all 0.2s;"/>`).join('')}
         </svg>
-        <div id="${containerId}_tt" style="position:absolute; display:none; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:11px; box-shadow:var(--shadow); pointer-events:none; z-index:10; white-space:nowrap;"></div>
+        <div id="${containerId}_tt" style="position:absolute; display:none; background:rgba(20,20,25,0.95); backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 14px; font-size:12px; box-shadow:0 8px 32px rgba(0,0,0,0.5); pointer-events:none; z-index:10; white-space:nowrap; transition: left 0.1s, top 0.1s;"></div>
     `;
     
     const tt = document.getElementById(`${containerId}_tt`);
@@ -1672,6 +1693,7 @@ function drawCompositionChart(containerId, data) {
             const idx = e.target.getAttribute('data-idx');
             const d = data[idx];
             c.setAttribute('r', '6');
+            c.style.filter = 'drop-shadow(0 0 6px rgba(255,255,255,0.5))';
             tt.style.display = 'block';
             
             const pC = d.cached || 0;
@@ -1679,21 +1701,23 @@ function drawCompositionChart(containerId, data) {
             const comp = Math.max(0, (d.tokens || 0) - pC - pU);
             
             tt.innerHTML = `
-                <div style="color:var(--text-dim);margin-bottom:6px;font-weight:bold;border-bottom:1px solid var(--border);padding-bottom:4px;">${d.date}</div>
-                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:var(--green)">命中缓存:</span> <span>${fmtNum(pC)}</span></div>
-                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:var(--blue)">未命中 Prompt:</span> <span>${fmtNum(pU)}</span></div>
-                <div style="display:flex; justify-content:space-between; width:140px; margin-bottom:3px;"><span style="color:#aaa">生成 Output:</span> <span>${fmtNum(comp)}</span></div>
-                <div style="display:flex; justify-content:space-between; width:140px; margin-top:4px; padding-top:4px; border-top:1px dashed var(--border); font-weight:bold;"><span style="color:var(--text)">Total:</span> <span>${fmtNum(d.tokens)}</span></div>
+                <div style="color:var(--text-dim);margin-bottom:8px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:6px;">${d.date}</div>
+                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--green)">命中缓存:</span> <span style="font-family:monospace">${fmtNum(pC)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:var(--blue)">未命中 Prompt:</span> <span style="font-family:monospace">${fmtNum(pU)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:160px; margin-bottom:4px;"><span style="color:#aaa">生成 Output:</span> <span style="font-family:monospace">${fmtNum(comp)}</span></div>
+                <div style="display:flex; justify-content:space-between; width:160px; margin-top:6px; padding-top:6px; border-top:1px dashed rgba(255,255,255,0.1); font-weight:800; font-size:13px;"><span style="color:var(--text)">Total:</span> <span style="font-family:monospace">${fmtNum(d.tokens)}</span></div>
             `;
             
-            let tx = parseFloat(c.getAttribute('cx')) + 10;
+            let tx = parseFloat(c.getAttribute('cx')) + 15;
             let ty = parseFloat(c.getAttribute('cy')) - 60;
-            if (tx + 160 > w) tx -= 180;
+            if (tx + 200 > container.clientWidth) tx = container.clientWidth - 210;
+            if (ty < 0) ty = 10;
             tt.style.left = tx + 'px';
             tt.style.top = ty + 'px';
         });
         c.addEventListener('mouseleave', () => {
             c.setAttribute('r', '4');
+            c.style.filter = 'none';
             tt.style.display = 'none';
         });
     });
@@ -1743,14 +1767,14 @@ async function loadAnalytics(){
     }
     
     document.getElementById('tokenStatsOverview').innerHTML = `
-        <div class="stat-item"><div class="num" style="color:var(--green)">${fmtNum(r.today)}</div><div class="label">今日消耗</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
-        <div class="stat-item"><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
+        <div class="stat-item"><div class="stat-icon">⚡</div><div class="num" style="color:var(--green)">${fmtNum(r.today)}</div><div class="label">今日消耗</div></div>
+        <div class="stat-item"><div class="stat-icon">📊</div><div class="num" style="color:var(--blue)">${fmtNum(r.last_3_days)}</div><div class="label">近 3 天</div></div>
+        <div class="stat-item"><div class="stat-icon">📅</div><div class="num" style="color:var(--yellow)">${fmtNum(r.last_7_days)}</div><div class="label">近 7 天</div></div>
+        <div class="stat-item"><div class="stat-icon">📈</div><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
+        <div class="stat-item"><div class="stat-icon">🔥</div><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
+        <div class="stat-item"><div class="stat-icon">🌍</div><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
+        <div class="stat-item"><div class="stat-icon">💾</div><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
+        <div class="stat-item"><div class="stat-icon">🧠</div><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
     `;
     
     setTimeout(() => {
@@ -1758,12 +1782,23 @@ async function loadAnalytics(){
         drawCompositionChart('tokenTrendChart', r.trend_14d);
     }, 50);
     
-    const renderTbl = (data) => data && data.length ? data.map(d => `
-        <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
-            <td style="padding: 6px;"><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></td>
-            <td style="padding: 6px; text-align:right; font-family: monospace;">${fmtNum(d.tokens)}</td>
-        </tr>
-    `).join('') : '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+    const renderTbl = (data) => {
+        if (!data || !data.length) return '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+        const maxT = Math.max(...data.map(d => d.tokens)) || 1;
+        return data.map(d => `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+                <td colspan="2" style="padding: 4px 0;">
+                    <div class="tbl-progress-container">
+                        <div class="tbl-progress-bar" style="width: ${(d.tokens/maxT*100).toFixed(1)}%;"></div>
+                        <div class="tbl-content">
+                            <div><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></div>
+                            <div style="text-align:right; font-family: monospace; font-weight:600;">${fmtNum(d.tokens)}</div>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    };
     
     document.getElementById('todayModelsTable').innerHTML = renderTbl(r.today_endpoints);
     document.getElementById('monthModelsTable').innerHTML = renderTbl(r.month_endpoints);
