@@ -536,6 +536,10 @@ class APIPool:
                 if is_stream:
                     def stream_generator():
                         stream_id = f"chatcmpl-{int(time.time()*1000)}"
+                        final_prompt_tokens = 0
+                        final_completion_tokens = 0
+                        final_total_tokens = 0
+                        has_usage = False
                         try:
                             for line in resp:
                                 if is_anthropic:
@@ -561,14 +565,14 @@ class APIPool:
                                             yield b"data: [DONE]\n\n"
                                         elif ctype == "message_delta" and "usage" in chunk:
                                             u = chunk["usage"]
-                                            tot = u.get("output_tokens", 0)
-                                            token_tracker.add_usage(ep.name, ep.model, 0, tot, tot)
-                                            ep._today_used += tot
+                                            final_completion_tokens += u.get("output_tokens", 0)
+                                            final_total_tokens += u.get("output_tokens", 0)
+                                            has_usage = True
                                         elif ctype == "message_start" and "message" in chunk and "usage" in chunk["message"]:
                                             u = chunk["message"]["usage"]
-                                            tot = u.get("input_tokens", 0)
-                                            token_tracker.add_usage(ep.name, ep.model, tot, 0, tot)
-                                            ep._today_used += tot
+                                            final_prompt_tokens += u.get("input_tokens", 0)
+                                            final_total_tokens += u.get("input_tokens", 0)
+                                            has_usage = True
                                     except Exception:
                                         pass
                                 else:
@@ -578,14 +582,18 @@ class APIPool:
                                             chunk = json.loads(line[6:].decode("utf-8"))
                                             if "usage" in chunk and chunk["usage"]:
                                                 u = chunk["usage"]
-                                                tot = u.get("total_tokens", 0)
-                                                token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot)
-                                                ep._today_used += tot
+                                                final_prompt_tokens = u.get("prompt_tokens", 0)
+                                                final_completion_tokens = u.get("completion_tokens", 0)
+                                                final_total_tokens = u.get("total_tokens", 0)
+                                                has_usage = True
                                         except Exception:
                                             pass
                         except Exception:
                             pass
                         finally:
+                            if has_usage:
+                                token_tracker.add_usage(ep.name, ep.model, final_prompt_tokens, final_completion_tokens, final_total_tokens)
+                                ep._today_used += final_total_tokens
                             resp.close()
                     return stream_generator(), ""
                 else:
