@@ -102,13 +102,7 @@ class TokenTracker:
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
             ep_cond = " AND endpoint_name = ?" if endpoint_filter and endpoint_filter != "all" else ""
-            params = (endpoint_filter,) if endpoint_cond_active() else ()
-            def execute_q(q):
-                cursor.execute(q, params)
-                return cursor
-
-            def endpoint_cond_active():
-                return endpoint_filter and endpoint_filter != "all"
+            params = (endpoint_filter,) if (endpoint_filter and endpoint_filter != "all") else ()
             
             cursor.execute(f"SELECT SUM(total_tokens), SUM(cached_tokens), SUM(prompt_tokens), COUNT(*) FROM token_usage WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}", params)
             today_row = cursor.fetchone()
