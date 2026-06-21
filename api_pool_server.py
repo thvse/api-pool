@@ -389,7 +389,7 @@ class APIPool:
 
     def _check_one_health(self, ep):
         if ep.health_mode == "none":
-            return ep.name, "unknown", -1, "已禁用健康检测"
+            return ep.id, "unknown", -1, "已禁用健康检测"
             
         if ep.health_mode == "models":
             t0 = time.time()
@@ -397,11 +397,11 @@ class APIPool:
                 models = self.fetch_models(ep.base_url, ep.api_key, timeout=10, use_proxy=ep.use_proxy, protocol=ep.protocol)
                 latency = int((time.time() - t0) * 1000)
                 if models:
-                    return ep.name, "ok", latency, ""
+                    return ep.id, "ok", latency, ""
                 else:
-                    return ep.name, "bad", latency, "获取模型列表失败"
+                    return ep.id, "bad", latency, "获取模型列表失败"
             except Exception as e:
-                return ep.name, "bad", int((time.time() - t0) * 1000), f"Models接口错误: {e}"[:100]
+                return ep.id, "bad", int((time.time() - t0) * 1000), f"Models接口错误: {e}"[:100]
                 
         payload = {"model": ep.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 3}
         
@@ -411,13 +411,13 @@ class APIPool:
         latency = int((time.time() - t0) * 1000)
         
         if reply is not None and latency <= LATENCY_OK_MAX:
-            return ep.name, "ok", latency, ""
+            return ep.id, "ok", latency, ""
             
         # Evaluate if we should retry
         err_str = err[:100] if err else ""
         hard_errors = ["auth error", "400", "401", "403", "404", "429"]
         if any(code in err_str for code in hard_errors):
-            return ep.name, "bad", latency, err_str
+            return ep.id, "bad", latency, err_str
             
         # Attempt 2 (Retry for cold start or transient glitch)
         t1 = time.time()
@@ -425,16 +425,16 @@ class APIPool:
         latency2 = int((time.time() - t1) * 1000)
         
         if reply2 is not None and latency2 <= LATENCY_OK_MAX:
-            return ep.name, "ok", latency2, ""
+            return ep.id, "ok", latency2, ""
             
         # If retry also fails or isn't fast enough, return the original attempt's status
         if reply is not None:
             if latency <= LATENCY_SLOW_MAX:
-                return ep.name, "slow", latency, ""
+                return ep.id, "slow", latency, ""
             else:
-                return ep.name, "bad", latency, f"延迟过高: {latency}ms"
+                return ep.id, "bad", latency, f"延迟过高: {latency}ms"
         else:
-            return ep.name, "bad", latency, err_str or "未知错误"
+            return ep.id, "bad", latency, err_str or "未知错误"
 
     def check_all_health(self):
         with self._lock:
@@ -451,19 +451,19 @@ class APIPool:
                     results.append(future.result())
                 except Exception as e:
                     ep = futures[future]
-                    results.append((ep.name, "bad", -1, str(e)))
+                    results.append((ep.id, "bad", -1, str(e)))
         now = time.time()
         with self._lock:
-            name_map = {ep.name: ep for ep in self._endpoints}
-            for name, health, latency, error in results:
-                ep = name_map.get(name)
+            id_map = {ep.id: ep for ep in self._endpoints}
+            for ep_id, health, latency, error in results:
+                ep = id_map.get(ep_id)
                 if ep:
                     ep._health = health
                     ep._health_latency_ms = latency
                     ep._health_last_check = now
                     ep._health_error = error
         sys_log(f"健康检测完成: 检测了 {len(endpoints)} 个端点", "INFO")
-        return [{"name": n, "health": h, "latency_ms": l, "error": e} for n, h, l, e in results]
+        return [{"id": i, "health": h, "latency_ms": l, "error": e} for i, h, l, e in results]
 
     def _is_in_cooldown(self, ep):
         return ep._cooldown_until > time.time()
