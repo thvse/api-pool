@@ -211,6 +211,113 @@ class TokenTracker:
 
 token_tracker = TokenTracker()
 
+class ChatLogger:
+    def __init__(self, db_path="chat_logs.db"):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _init_db(self):
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute('''CREATE TABLE IF NOT EXISTS chat_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                endpoint_name TEXT,
+                model TEXT,
+                prompt TEXT,
+                completion TEXT,
+                total_tokens INTEGER,
+                latency_ms INTEGER
+            )''')
+            conn.commit()
+            conn.close()
+
+    def add_log(self, endpoint_name, model, prompt, completion, total_tokens, latency_ms):
+        def _write():
+            with self._lock:
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    c = conn.cursor()
+                    c.execute(
+                        "INSERT INTO chat_logs (endpoint_name, model, prompt, completion, total_tokens, latency_ms) VALUES (?, ?, ?, ?, ?, ?)",
+                        (endpoint_name, model, prompt, completion, total_tokens, latency_ms)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    sys_log(f"记录聊天明细失败: {e}", "ERROR")
+        threading.Thread(target=_write, daemon=True).start()
+
+    def get_logs(self, limit=50, offset=0):
+        with self._lock:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                c = conn.cursor()
+                c.execute(
+                    "SELECT id, datetime(timestamp, 'localtime'), endpoint_name, model, prompt, completion, total_tokens, latency_ms FROM chat_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset)
+                )
+                rows = c.fetchall()
+                
+                c.execute("SELECT COUNT(*) FROM chat_logs")
+                total = c.fetchone()[0]
+                conn.close()
+                
+                return {
+                    "total": total,
+                    "logs": [
+                        {
+                            "id": r[0],
+                            "timestamp": r[1],
+                            "endpoint_name": r[2],
+                            "model": r[3],
+                            "prompt": r[4],
+                            "completion": r[5],
+                            "total_tokens": r[6],
+                            "latency_ms": r[7]
+                        } for r in rows
+                    ]
+                }
+            except Exception as e:
+                return {"total": 0, "logs": [], "error": str(e)}
+
+    def clear_logs(self):
+        with self._lock:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                c = conn.cursor()
+                c.execute("DELETE FROM chat_logs")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+chat_logger = ChatLogger()
+
+def extract_prompt_text(payload):
+    try:
+        messages = payload.get("messages", [])
+        output = []
+        for m in messages:
+            role = m.get("role", "unknown")
+            content = m.get("content", "")
+            if isinstance(content, str):
+                output.append(f"[{role.upper()}]\n{content}")
+            elif isinstance(content, list):
+                parts = []
+                for part in content:
+                    ptype = part.get("type", "")
+                    if ptype == "text":
+                        parts.append(part.get("text", ""))
+                    elif ptype == "image_url":
+                        parts.append("[Base64 Image Omitted]")
+                output.append(f"[{role.upper()}]\n" + "\n".join(parts))
+        return "\n\n".join(output)
+    except Exception:
+        return str(payload)[:2000]
+
 # ============================================================
 #  数据结构
 # ============================================================
@@ -589,6 +696,8 @@ class APIPool:
         raise AllEndpointsFailed(errors)
 
     def _try_endpoint(self, ep, payload, timeout, log_usage=True, force_no_retry=False):
+        req_t0 = time.time()
+        prompt_text_to_log = extract_prompt_text(payload) if log_usage and not ep.name.startswith("test_") else ""
         is_anthropic = (getattr(ep, "protocol", "openai") == "anthropic")
         
         if is_anthropic:
@@ -673,6 +782,7 @@ class APIPool:
                         final_total_tokens = 0
                         final_cached_tokens = 0
                         has_usage = False
+                        final_completion_text = ""
                         try:
                             for line in resp:
                                 if is_anthropic:
@@ -685,6 +795,7 @@ class APIPool:
                                         ctype = chunk.get("type")
                                         if ctype == "content_block_delta":
                                             text = chunk.get("delta", {}).get("text", "")
+                                            final_completion_text += text
                                             if text:
                                                 o_chunk = {
                                                     "id": stream_id,
@@ -728,6 +839,10 @@ class APIPool:
                                     if line.strip() and line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
                                         try:
                                             chunk = json.loads(line[6:].decode("utf-8"))
+                                            if "choices" in chunk and len(chunk["choices"]) > 0:
+                                                delta = chunk["choices"][0].get("delta", {})
+                                                if "content" in delta:
+                                                    final_completion_text += delta.get("content", "")
                                             if "usage" in chunk and chunk["usage"]:
                                                 u = chunk["usage"]
                                                 final_prompt_tokens = u.get("prompt_tokens", 0)
@@ -743,6 +858,7 @@ class APIPool:
                         finally:
                             if has_usage and log_usage and not ep.name.startswith("test_"):
                                 token_tracker.add_usage(ep.name, ep.model, final_prompt_tokens, final_completion_tokens, final_total_tokens, final_cached_tokens)
+                                chat_logger.add_log(ep.name, ep.model, prompt_text_to_log, final_completion_text, final_total_tokens, int((time.time() - req_t0) * 1000))
                                 ep._today_used += final_total_tokens
                             resp.close()
                     return stream_generator(), ""
@@ -759,6 +875,7 @@ class APIPool:
                             cached = u.get("cache_read_input_tokens", 0)
                             if log_usage and not ep.name.startswith("test_"):
                                 token_tracker.add_usage(ep.name, ep.model, prompt_t, u.get("output_tokens", 0), tot, cached)
+                                chat_logger.add_log(ep.name, ep.model, prompt_text_to_log, reply.strip(), tot, int((time.time() - req_t0) * 1000))
                                 ep._today_used += tot
                         return reply.strip(), ""
                     else:
@@ -770,8 +887,10 @@ class APIPool:
                                 cached = u["prompt_tokens_details"].get("cached_tokens", 0)
                             if log_usage and not ep.name.startswith("test_"):
                                 token_tracker.add_usage(ep.name, ep.model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), tot, cached)
+                                content = body["choices"][0]["message"].get("content", "")
+                                chat_logger.add_log(ep.name, ep.model, prompt_text_to_log, content.strip(), tot, int((time.time() - req_t0) * 1000))
                                 ep._today_used += tot
-                        content = body["choices"][0]["message"].get("content")
+                        content = body["choices"][0]["message"].get("content", "")
                         return (content.strip() if content else ""), ""
                     
                     
@@ -935,6 +1054,16 @@ def api_handler(method, path, body):
         qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
         last_id = int(qs.get("since", 0))
         return 200, sys_logger.get_logs_since(last_id), False
+
+    if method == "GET" and cp == "/api/chat-logs":
+        qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
+        limit = int(qs.get("limit", 50))
+        offset = int(qs.get("offset", 0))
+        return 200, chat_logger.get_logs(limit=limit, offset=offset), False
+
+    if method == "DELETE" and cp == "/api/chat-logs":
+        chat_logger.clear_logs()
+        return 200, {"ok": True}, False
 
     if method == "GET" and cp == "/api/token-stats":
         qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
@@ -1227,6 +1356,7 @@ select option { background: var(--bg); color: var(--text); }
       </div>
   </div>
   <div class="header-actions" id="poolActions">
+    <button class="btn btn-ghost" onclick="openChatLogsModal()">💬 聊天明细</button>
     <button class="btn btn-ghost" onclick="runHealthCheck()">🩺 健康检测</button>
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
@@ -1400,6 +1530,45 @@ select option { background: var(--bg); color: var(--text); }
 
 
 <div class="toast" id="toast"></div>
+
+<div id="chatLogsModal" class="modal">
+  <div class="modal-content" style="max-width:900px; height:80vh; display:flex; flex-direction:column;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+      <h3 style="margin:0;">💬 聊天明细 (Audit Logs)</h3>
+      <div style="display:flex; gap:10px;">
+        <button class="btn btn-ghost" onclick="clearChatLogs()" style="color:var(--red);">🗑 清空所有</button>
+        <button class="btn btn-ghost" onclick="closeChatLogsModal()">✕ 关闭</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:15px; flex:1; min-height:0;">
+      <!-- List View -->
+      <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+        <div style="background:rgba(255,255,255,0.05); padding:8px 12px; font-weight:bold; border-bottom:1px solid var(--border); display:grid; grid-template-columns: 80px 1fr 1fr 80px; gap:8px; font-size:12px;">
+          <span>时间</span><span>端点</span><span>模型</span><span>Tokens</span>
+        </div>
+        <div id="chatLogsList" style="flex:1; overflow-y:auto;">
+          <!-- Items inserted here -->
+        </div>
+        <div style="padding:8px; text-align:center; border-top:1px solid var(--border);">
+            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage-1)" id="clPrevBtn">上一页</button>
+            <span style="margin:0 10px;font-size:12px;" id="clPageSpan">1</span>
+            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage+1)" id="clNextBtn">下一页</button>
+        </div>
+      </div>
+      <!-- Detail View -->
+      <div style="flex:1; display:flex; flex-direction:column; gap:15px; overflow:hidden;">
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Prompt</div>
+          <pre id="clPrompt" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+        </div>
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Completion <span id="clMeta" style="float:right;"></span></div>
+          <pre id="clCompletion" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 document.getElementById('displayUrl').textContent = window.location.protocol + '//' + window.location.host + '/v1';
@@ -2067,6 +2236,71 @@ async function pollLogs() {
 pollLogs();
 
 refresh();setInterval(refresh,3000);
+let chatLogsPage = 0;
+let currentChatLogs = [];
+async function openChatLogsModal() {
+  document.getElementById('chatLogsModal').style.display='flex';
+  document.getElementById('clPrompt').textContent = '';
+  document.getElementById('clCompletion').textContent = '';
+  document.getElementById('clMeta').textContent = '';
+  chatLogsPage = 0;
+  await loadChatLogs(0);
+}
+function closeChatLogsModal() {
+  document.getElementById('chatLogsModal').style.display='none';
+}
+async function loadChatLogs(page) {
+  if (page < 0) return;
+  const limit = 50;
+  const offset = page * limit;
+  const res = await api('GET', `/api/chat-logs?limit=${limit}&offset=${offset}`);
+  if (!res.ok && res.error) { toast('加载失败', 'error'); return; }
+  chatLogsPage = page;
+  currentChatLogs = res.logs || [];
+  
+  const total = res.total || 0;
+  const maxPage = Math.max(0, Math.ceil(total / limit) - 1);
+  
+  document.getElementById('clPageSpan').textContent = `${page + 1} / ${maxPage + 1}`;
+  document.getElementById('clPrevBtn').disabled = page <= 0;
+  document.getElementById('clNextBtn').disabled = page >= maxPage;
+  
+  const listEl = document.getElementById('chatLogsList');
+  if (currentChatLogs.length === 0) {
+    listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim);">暂无日志记录</div>';
+    return;
+  }
+  
+  listEl.innerHTML = currentChatLogs.map((log, i) => `
+    <div style="padding:8px 12px; border-bottom:1px solid var(--border); display:grid; grid-template-columns: 80px 1fr 1fr 80px; gap:8px; font-size:12px; cursor:pointer; transition:background 0.2s;" class="hover-bg" onclick="viewChatLog(${i})">
+      <div style="color:var(--text-dim);">${log.timestamp.split(' ')[1]}</div>
+      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${log.endpoint_name}">${log.endpoint_name}</div>
+      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent-light);" title="${log.model}">${log.model}</div>
+      <div style="color:var(--green);">${log.total_tokens}</div>
+    </div>
+  `).join('');
+}
+function viewChatLog(idx) {
+  const log = currentChatLogs[idx];
+  if (!log) return;
+  document.getElementById('clPrompt').textContent = log.prompt || '';
+  document.getElementById('clCompletion').textContent = log.completion || '';
+  document.getElementById('clMeta').innerHTML = `<span style="color:var(--green)">${log.total_tokens} Tokens</span> <span style="margin-left:10px;color:var(--yellow)">${log.latency_ms}ms</span>`;
+}
+async function clearChatLogs() {
+  if (!confirm('确定要清空所有聊天明细记录吗？此操作不可逆。')) return;
+  await api('DELETE', '/api/chat-logs');
+  toast('已清空', 'success');
+  loadChatLogs(0);
+}
+
+// Add CSS for hover
+const style = document.createElement('style');
+style.innerHTML = `
+  .hover-bg:hover { background: rgba(255,255,255,0.05); }
+`;
+document.head.appendChild(style);
+
 </script>
 </body>
 </html>"""
