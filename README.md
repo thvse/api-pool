@@ -9,13 +9,16 @@
 
 ## 📸 界面预览 (Screenshots)
 
-> 💡 **提示**：建议你在这里放上运行后的控制台或面板截图！
-> *(你可以把截图重命名为 `dashboard.png` 和 `analytics.png` 并放在 `assets` 文件夹中)*
-
 - **控制台主页 (Dashboard):**
   ![Dashboard](./assets/dashboard.png)
-- **数据大盘与审计日志 (Analytics & Audit Logs):**
+- **数据大盘 (Analytics):**
   ![Analytics](./assets/analytics.jpeg)
+- **聊天明细溯源 (Audit Logs):**
+  ![Audit Logs](./assets/chat_logs.jpeg)
+- **实时调度日志 (System Logs):**
+  ![System Logs](./assets/sys_logs.png)
+- **端点细粒度配置 (Endpoint Config):**
+  ![Endpoint Config](./assets/add_endpoint.png)
 
 ---
 
