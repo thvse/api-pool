@@ -1145,7 +1145,7 @@ def api_handler(method, path, body):
             if ep["id"] == ep_id: target_ep = ep; break
         if not target_ep: return 404, {"error": "端点不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
-        test_pool.add_endpoint({"name": name, "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
+        test_pool.add_endpoint({"name": target_ep["name"], "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
         try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/test-pool":
@@ -1374,7 +1374,6 @@ select option { background: var(--bg); color: var(--text); }
       </div>
   </div>
   <div class="header-actions" id="poolActions">
-    <button class="btn btn-ghost" onclick="openChatLogsModal()">💬 聊天明细</button>
     <button class="btn btn-ghost" onclick="runHealthCheck()">🩺 健康检测</button>
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
@@ -1432,6 +1431,41 @@ select option { background: var(--bg); color: var(--text); }
   </div>
   <div class="log-container" id="logContainer"></div>
 </div>
+
+<div class="log-card" style="margin-top:20px; display:flex; flex-direction:column; padding-bottom:15px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+      <div class="card-title" style="margin-bottom:0;"><span class="icon">💬</span> 聊天明细 (Audit Logs)</div>
+      <button class="btn btn-ghost btn-sm" onclick="clearChatLogs()" style="color:var(--red); padding:2px 8px;">🗑 清空记录</button>
+    </div>
+    <div style="display:flex; gap:15px; height:450px; min-height:300px;">
+      <!-- List View -->
+      <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+        <div style="background:rgba(255,255,255,0.05); padding:8px 12px; font-weight:bold; border-bottom:1px solid var(--border); display:grid; grid-template-columns: 80px 1fr 1fr 80px; gap:8px; font-size:12px;">
+          <span>时间</span><span>端点</span><span>模型</span><span>Tokens</span>
+        </div>
+        <div id="chatLogsList" style="flex:1; overflow-y:auto;">
+          <!-- Items inserted here -->
+        </div>
+        <div style="padding:8px; text-align:center; border-top:1px solid var(--border);">
+            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage-1)" id="clPrevBtn">上一页</button>
+            <span style="margin:0 10px;font-size:12px;" id="clPageSpan">1</span>
+            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage+1)" id="clNextBtn">下一页</button>
+        </div>
+      </div>
+      <!-- Detail View -->
+      <div style="flex:1; display:flex; flex-direction:column; gap:15px; overflow:hidden;">
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Prompt</div>
+          <pre id="clPrompt" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+        </div>
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Completion <span id="clMeta" style="float:right;"></span></div>
+          <pre id="clCompletion" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+        </div>
+      </div>
+    </div>
+</div>
+
 </div>
 
 <div id="viewAnalytics" style="display:none; padding-bottom:40px;">
@@ -1552,45 +1586,6 @@ select option { background: var(--bg); color: var(--text); }
 
 
 <div class="toast" id="toast"></div>
-
-<div id="chatLogsModal" class="modal">
-  <div class="modal-content" style="max-width:900px; height:80vh; display:flex; flex-direction:column;">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-      <h3 style="margin:0;">💬 聊天明细 (Audit Logs)</h3>
-      <div style="display:flex; gap:10px;">
-        <button class="btn btn-ghost" onclick="clearChatLogs()" style="color:var(--red);">🗑 清空所有</button>
-        <button class="btn btn-ghost" onclick="closeChatLogsModal()">✕ 关闭</button>
-      </div>
-    </div>
-    <div style="display:flex; gap:15px; flex:1; min-height:0;">
-      <!-- List View -->
-      <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
-        <div style="background:rgba(255,255,255,0.05); padding:8px 12px; font-weight:bold; border-bottom:1px solid var(--border); display:grid; grid-template-columns: 80px 1fr 1fr 80px; gap:8px; font-size:12px;">
-          <span>时间</span><span>端点</span><span>模型</span><span>Tokens</span>
-        </div>
-        <div id="chatLogsList" style="flex:1; overflow-y:auto;">
-          <!-- Items inserted here -->
-        </div>
-        <div style="padding:8px; text-align:center; border-top:1px solid var(--border);">
-            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage-1)" id="clPrevBtn">上一页</button>
-            <span style="margin:0 10px;font-size:12px;" id="clPageSpan">1</span>
-            <button class="btn btn-ghost btn-sm" onclick="loadChatLogs(chatLogsPage+1)" id="clNextBtn">下一页</button>
-        </div>
-      </div>
-      <!-- Detail View -->
-      <div style="flex:1; display:flex; flex-direction:column; gap:15px; overflow:hidden;">
-        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
-          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Prompt</div>
-          <pre id="clPrompt" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
-        </div>
-        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
-          <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Completion <span id="clMeta" style="float:right;"></span></div>
-          <pre id="clCompletion" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
 
 <script>
 document.getElementById('displayUrl').textContent = window.location.protocol + '//' + window.location.host + '/v1';
@@ -2257,20 +2252,21 @@ async function pollLogs() {
 }
 pollLogs();
 
-refresh();setInterval(refresh,3000);
+refresh();
+setInterval(() => {
+    refresh();
+    loadChatLogs(chatLogsPage);
+}, 3000);
 let chatLogsPage = 0;
 let currentChatLogs = [];
-async function openChatLogsModal() {
-  document.getElementById('chatLogsModal').style.display='flex';
+async function initChatLogs() {
   document.getElementById('clPrompt').textContent = '';
   document.getElementById('clCompletion').textContent = '';
   document.getElementById('clMeta').textContent = '';
   chatLogsPage = 0;
   await loadChatLogs(0);
 }
-function closeChatLogsModal() {
-  document.getElementById('chatLogsModal').style.display='none';
-}
+initChatLogs();
 async function loadChatLogs(page) {
   if (page < 0) return;
   const limit = 50;
