@@ -407,7 +407,7 @@ class APIPool:
         
         # Attempt 1
         t0 = time.time()
-        reply, err = self._try_endpoint(ep, payload, timeout=10, log_usage=False)
+        reply, err = self._try_endpoint(ep, payload, timeout=10, log_usage=False, force_no_retry=True)
         latency = int((time.time() - t0) * 1000)
         
         if reply is not None and latency <= LATENCY_OK_MAX:
@@ -421,7 +421,7 @@ class APIPool:
             
         # Attempt 2 (Retry for cold start or transient glitch)
         t1 = time.time()
-        reply2, err2 = self._try_endpoint(ep, payload, timeout=10, log_usage=False)
+        reply2, err2 = self._try_endpoint(ep, payload, timeout=10, log_usage=False, force_no_retry=True)
         latency2 = int((time.time() - t1) * 1000)
         
         if reply2 is not None and latency2 <= LATENCY_OK_MAX:
@@ -588,7 +588,7 @@ class APIPool:
                 tried += 1
         raise AllEndpointsFailed(errors)
 
-    def _try_endpoint(self, ep, payload, timeout, log_usage=True):
+    def _try_endpoint(self, ep, payload, timeout, log_usage=True, force_no_retry=False):
         is_anthropic = (getattr(ep, "protocol", "openai") == "anthropic")
         
         if is_anthropic:
@@ -641,7 +641,8 @@ class APIPool:
             
         is_stream = payload.get("stream", False)
         
-        for attempt in range(ep.max_retries + 1):
+        retries = 0 if force_no_retry else ep.max_retries
+        for attempt in range(retries + 1):
             if ep.rpm_limit > 0:
                 with ep._rpm_lock:
                     ep._req_timestamps.append(time.time())
@@ -782,14 +783,14 @@ class APIPool:
                 if e.code == 429: return None, msg + " (429 rate-limited)"
                 if e.code in (401, 403): return None, msg + " (auth error)"
                 if e.code >= 500:
-                    if attempt < ep.max_retries:
+                    if attempt < retries:
                         time.sleep(1.5 * (attempt + 1))
                         continue
                     return None, msg
                 return None, msg
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 msg = f"连接/超时错误: {e}"
-                if attempt < ep.max_retries:
+                if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 return None, msg
