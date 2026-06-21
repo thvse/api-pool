@@ -98,6 +98,13 @@ class TokenTracker:
         except Exception:
             return 0
 
+    def rename_endpoint(self, old_name: str, new_name: str):
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute("UPDATE token_usage SET endpoint_name = ? WHERE endpoint_name = ?", (new_name, old_name))
+        except Exception as e:
+            sys_log(f"重命名端点统计数据失败: {e}", "WARN")
+
     def get_stats(self, endpoint_filter=None):
         with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
@@ -884,12 +891,22 @@ def api_handler(method, path, body):
     if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
     if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
     if method == "POST" and cp == "/api/endpoints":
+        new_name = body.get("name", "")
+        if any(ep["name"] == new_name for ep in pool.list_endpoints()): return 400, {"error": "端点名称已存在"}, False
         pool.add_endpoint(body); _sync_to_config(); return 201, {"ok": True}, False
     if method == "POST" and cp == "/api/endpoints/batch":
         items = body.get("endpoints", []); base = body.get("base", {}); added = 0; start_priority = base.get("start_priority", 1)
+        existing_names = {ep["name"] for ep in pool.list_endpoints()}
         for i, item in enumerate(items):
+            base_name = item.get("name", f"ep_{i}")
+            new_name = base_name
+            suffix = 1
+            while new_name in existing_names:
+                new_name = f"{base_name} ({suffix})"
+                suffix += 1
+            existing_names.add(new_name)
             ep = {
-                "name": item.get("name", f"ep_{i}"), "base_url": item.get("base_url", base.get("base_url", "")),
+                "name": new_name, "base_url": item.get("base_url", base.get("base_url", "")),
                 "api_key": item.get("api_key", base.get("api_key", "")), "model": item.get("model", ""),
                 "priority": item.get("priority", start_priority + i), "timeout": item.get("timeout", base.get("timeout", 15)),
                 "max_retries": item.get("max_retries", base.get("max_retries", 1)), "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
@@ -901,7 +918,12 @@ def api_handler(method, path, body):
             if ep["model"]: pool.add_endpoint(ep); added += 1
         _sync_to_config(); return 201, {"ok": True, "added": added}, False
     if method == "PUT" and cp.startswith("/api/endpoints/") and not cp.endswith("/toggle"):
-        name = unquote(cp.split("/")[-1]); pool.update_endpoint(name, body); _sync_to_config(); return 200, {"ok": True}, False
+        old_name = unquote(cp.split("/")[-1])
+        new_name = body.get("name", old_name)
+        if new_name != old_name:
+            if any(ep["name"] == new_name for ep in pool.list_endpoints()): return 400, {"error": "端点名称已存在"}, False
+            token_tracker.rename_endpoint(old_name, new_name)
+        pool.update_endpoint(old_name, body); _sync_to_config(); return 200, {"ok": True}, False
     if method == "DELETE" and cp.startswith("/api/endpoints/"):
         name = unquote(cp.split("/")[-1]); pool.remove_endpoint(name); _sync_to_config(); return 200, {"ok": True}, False
     if method == "POST" and cp.endswith("/toggle"):
