@@ -43,7 +43,7 @@
 
 ### 1. 下载或克隆仓库
 ```bash
-git clone https://github.com/yourname/api-pool.git
+git clone https://github.com/thvse/api-pool.git
 cd api-pool
 ```
 
