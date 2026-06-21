@@ -13,9 +13,9 @@
 > *(你可以把截图重命名为 `dashboard.png` 和 `analytics.png` 并放在 `assets` 文件夹中)*
 
 - **控制台主页 (Dashboard):**
-  *(在这里插入主页截图，如：`![Dashboard](./assets/dashboard.png)`)*
+  ![Dashboard](./assets/dashboard.png)
 - **数据大盘与审计日志 (Analytics & Audit Logs):**
-  *(在这里插入数据大盘截图，如：`![Analytics](./assets/analytics.png)`)*
+  ![Analytics](./assets/analytics.jpeg)
 
 ---
 
