@@ -930,40 +930,48 @@ class APIPool:
         return None, "重试次数用尽"
 
     def fetch_models(self, base_url, api_key, timeout=10, use_proxy=True, protocol="openai"):
-        if protocol == "anthropic":
-            return [
-                {"id": "claude-3-5-sonnet-20240620", "description": "Anthropic Claude 3.5 Sonnet", "modality": "unknown", "modality_source": "none"},
-                {"id": "claude-3-opus-20240229", "description": "Anthropic Claude 3 Opus", "modality": "unknown", "modality_source": "none"},
-                {"id": "claude-3-sonnet-20240229", "description": "Anthropic Claude 3 Sonnet", "modality": "unknown", "modality_source": "none"},
-                {"id": "claude-3-haiku-20240307", "description": "Anthropic Claude 3 Haiku", "modality": "unknown", "modality_source": "none"}
-            ]
-            
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
         safe_api_key = api_key.encode('ascii', 'ignore').decode('ascii').strip()
-        req.add_header("Authorization", f"Bearer {safe_api_key}")
         
-        if not use_proxy:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            resp = opener.open(req, timeout=timeout)
+        if protocol == "anthropic":
+            req.add_header("x-api-key", safe_api_key)
+            req.add_header("anthropic-version", "2023-06-01")
         else:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            req.add_header("Authorization", f"Bearer {safe_api_key}")
             
-        with resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = data.get("data", [])
-            models = []
-            for m in raw:
-                mid = m.get("id", "")
-                if not mid: continue
-                info = {"id": mid}
-                if "pricing" in m: info["pricing"] = m["pricing"]
-                if "description" in m: info["description"] = m["description"][:120]
-                info["modality"] = "unknown"
-                info["modality_source"] = "none"
-                models.append(info)
-            models.sort(key=lambda x: x["id"])
-            return models
+        try:
+            if not use_proxy:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=timeout)
+            else:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                
+            with resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                raw = data.get("data", [])
+                models = []
+                for m in raw:
+                    mid = m.get("id", "")
+                    if not mid: continue
+                    info = {"id": mid}
+                    if "pricing" in m: info["pricing"] = m["pricing"]
+                    if "description" in m: info["description"] = m["description"][:120]
+                    info["modality"] = "unknown"
+                    info["modality_source"] = "none"
+                    models.append(info)
+                models.sort(key=lambda x: x["id"])
+                return models
+        except Exception as e:
+            if protocol == "anthropic":
+                # Fallback to hardcoded list if Anthropic endpoint doesn't support /models
+                return [
+                    {"id": "claude-3-5-sonnet-20241022", "description": "Anthropic Claude 3.5 Sonnet"},
+                    {"id": "claude-3-5-sonnet-20240620", "description": "Anthropic Claude 3.5 Sonnet (Old)"},
+                    {"id": "claude-3-opus-20240229", "description": "Anthropic Claude 3 Opus"},
+                    {"id": "claude-3-haiku-20240307", "description": "Anthropic Claude 3 Haiku"}
+                ]
+            raise e
 
     def test_vision(self, base_url, api_key, model, timeout=15, use_proxy=True, protocol="openai"):
         ep = Endpoint(name="test_vision", base_url=base_url, api_key=api_key, model=model, max_retries=0, use_proxy=use_proxy, protocol=protocol)
