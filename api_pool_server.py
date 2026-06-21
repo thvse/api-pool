@@ -382,18 +382,37 @@ class APIPool:
 
     def _check_one_health(self, ep):
         payload = {"model": ep.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 3}
+        
+        # Attempt 1
         t0 = time.time()
-        reply, err = self._try_endpoint(ep, payload, timeout=10)
+        reply, err = self._try_endpoint(ep, payload, timeout=10, log_usage=False)
         latency = int((time.time() - t0) * 1000)
+        
+        if reply is not None and latency <= LATENCY_OK_MAX:
+            return ep.name, "ok", latency, ""
+            
+        # Evaluate if we should retry
+        err_str = err[:100] if err else ""
+        hard_errors = ["auth error", "400", "401", "403", "404", "429"]
+        if any(code in err_str for code in hard_errors):
+            return ep.name, "bad", latency, err_str
+            
+        # Attempt 2 (Retry for cold start or transient glitch)
+        t1 = time.time()
+        reply2, err2 = self._try_endpoint(ep, payload, timeout=10, log_usage=False)
+        latency2 = int((time.time() - t1) * 1000)
+        
+        if reply2 is not None and latency2 <= LATENCY_OK_MAX:
+            return ep.name, "ok", latency2, ""
+            
+        # If retry also fails or isn't fast enough, return the original attempt's status
         if reply is not None:
-            if latency <= LATENCY_OK_MAX:
-                return ep.name, "ok", latency, ""
-            elif latency <= LATENCY_SLOW_MAX:
+            if latency <= LATENCY_SLOW_MAX:
                 return ep.name, "slow", latency, ""
             else:
                 return ep.name, "bad", latency, f"延迟过高: {latency}ms"
         else:
-            return ep.name, "bad", latency, err[:100] if err else "未知错误"
+            return ep.name, "bad", latency, err_str or "未知错误"
 
     def check_all_health(self):
         with self._lock:
