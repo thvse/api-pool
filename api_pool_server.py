@@ -281,24 +281,24 @@ class APIPool:
             self._endpoints.sort(key=lambda e: e.priority)
             self._current_idx = 0
 
-    def remove_endpoint(self, name):
+    def remove_endpoint(self, ep_id):
         with self._lock:
-            self._endpoints = [e for e in self._endpoints if e.name != name]
+            self._endpoints = [e for e in self._endpoints if e.id != ep_id]
             self._current_idx = 0
 
-    def set_enabled(self, name, enabled):
+    def set_enabled(self, ep_id, enabled):
         with self._lock:
             for ep in self._endpoints:
-                if ep.name == name:
+                if ep.id == ep_id:
                     ep.enabled = enabled
                     break
 
-    def update_endpoint(self, name, updates: dict):
+    def update_endpoint(self, ep_id, updates: dict):
         with self._lock:
             for ep in self._endpoints:
-                if ep.name == name:
+                if ep.id == ep_id:
                     for k, v in updates.items():
-                        if hasattr(ep, k) and not k.startswith("_"):
+                        if hasattr(ep, k) and not k.startswith("_") and k != "id":
                             setattr(ep, k, v)
                     self._endpoints.sort(key=lambda e: e.priority)
                     break
@@ -891,22 +891,12 @@ def api_handler(method, path, body):
     if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
     if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
     if method == "POST" and cp == "/api/endpoints":
-        new_name = body.get("name", "")
-        if any(ep["name"] == new_name for ep in pool.list_endpoints()): return 400, {"error": "端点名称已存在"}, False
         pool.add_endpoint(body); _sync_to_config(); return 201, {"ok": True}, False
     if method == "POST" and cp == "/api/endpoints/batch":
         items = body.get("endpoints", []); base = body.get("base", {}); added = 0; start_priority = base.get("start_priority", 1)
-        existing_names = {ep["name"] for ep in pool.list_endpoints()}
         for i, item in enumerate(items):
-            base_name = item.get("name", f"ep_{i}")
-            new_name = base_name
-            suffix = 1
-            while new_name in existing_names:
-                new_name = f"{base_name} ({suffix})"
-                suffix += 1
-            existing_names.add(new_name)
             ep = {
-                "name": new_name, "base_url": item.get("base_url", base.get("base_url", "")),
+                "name": item.get("name", base.get("name", f"ep_{i}")), "base_url": item.get("base_url", base.get("base_url", "")),
                 "api_key": item.get("api_key", base.get("api_key", "")), "model": item.get("model", ""),
                 "priority": item.get("priority", start_priority + i), "timeout": item.get("timeout", base.get("timeout", 15)),
                 "max_retries": item.get("max_retries", base.get("max_retries", 1)), "cooldown_minutes": item.get("cooldown_minutes", base.get("cooldown_minutes", 5)),
@@ -918,18 +908,18 @@ def api_handler(method, path, body):
             if ep["model"]: pool.add_endpoint(ep); added += 1
         _sync_to_config(); return 201, {"ok": True, "added": added}, False
     if method == "PUT" and cp.startswith("/api/endpoints/") and not cp.endswith("/toggle"):
-        old_name = unquote(cp.split("/")[-1])
-        new_name = body.get("name", old_name)
-        if new_name != old_name:
-            if any(ep["name"] == new_name for ep in pool.list_endpoints()): return 400, {"error": "端点名称已存在"}, False
-            token_tracker.rename_endpoint(old_name, new_name)
-        pool.update_endpoint(old_name, body); _sync_to_config(); return 200, {"ok": True}, False
+        ep_id = unquote(cp.split("/")[-1])
+        new_name = body.get("name")
+        old_ep = next((e for e in pool.list_endpoints() if e["id"] == ep_id), None)
+        if old_ep and new_name and new_name != old_ep["name"]:
+            token_tracker.rename_endpoint(old_ep["name"], new_name)
+        pool.update_endpoint(ep_id, body); _sync_to_config(); return 200, {"ok": True}, False
     if method == "DELETE" and cp.startswith("/api/endpoints/"):
-        name = unquote(cp.split("/")[-1]); pool.remove_endpoint(name); _sync_to_config(); return 200, {"ok": True}, False
+        ep_id = unquote(cp.split("/")[-1]); pool.remove_endpoint(ep_id); _sync_to_config(); return 200, {"ok": True}, False
     if method == "POST" and cp.endswith("/toggle"):
-        name = unquote(cp.split("/")[3])
+        ep_id = unquote(cp.split("/")[3])
         for ep in pool.list_endpoints():
-            if ep["name"] == name: pool.set_enabled(name, not ep["enabled"]); break
+            if ep["id"] == ep_id: pool.set_enabled(ep_id, not ep["enabled"]); break
         _sync_to_config(); return 200, {"ok": True}, False
     if method == "POST" and cp == "/api/health-check": return 200, {"ok": True, "results": pool.check_all_health()}, False
     if method == "POST" and cp == "/api/fetch-models":
@@ -964,7 +954,7 @@ def api_handler(method, path, body):
     return 404, {"error": "Not found"}, False
 
 def _sync_to_config():
-    save_config([{"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key_full"], "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"], "daily_limit": ep.get("daily_limit", 0), "rpm_limit": ep.get("rpm_limit", 0), "use_proxy": ep.get("use_proxy", True), "protocol": ep.get("protocol", "openai")} for ep in pool.list_endpoints()])
+    save_config([{"id": ep.get("id"), "name": ep["name"], "base_url": ep["base_url"], "api_key": ep.get("api_key_full", ep.get("api_key", "")), "model": ep["model"], "priority": ep["priority"], "timeout": ep["timeout"], "max_retries": ep["max_retries"], "enabled": ep["enabled"], "cooldown_minutes": ep["cooldown_minutes"], "daily_limit": ep.get("daily_limit", 0), "rpm_limit": ep.get("rpm_limit", 0), "use_proxy": ep.get("use_proxy", True), "protocol": ep.get("protocol", "openai")} for ep in pool.list_endpoints()])
 
 
 GUI_HTML = r"""<!DOCTYPE html>
@@ -1575,44 +1565,44 @@ async function testSelectedVision(){
 }
 
 function openAddModal(){
-  document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
-  ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';
-  document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
-  document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
-  allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
-  document.getElementById('modal').classList.add('show');
+    document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
+    ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
+    document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=15;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';
+    document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
+    document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
+    allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
+    document.getElementById('modal').classList.add('show');
 }
-function editEndpoint(name){
-  api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.name===name);if(!ep)return;
-    document.getElementById('editName').value=name;document.getElementById('modalTitle').textContent='编辑端点';
-    document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
-    document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';
-    document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
-    allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
-  });
+function editEndpoint(id){
+    api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.id===id);if(!ep)return;
+        document.getElementById('editName').value=id;document.getElementById('modalTitle').textContent='编辑端点';
+        document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
+        document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';
+        document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
+        allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
+    });
 }
 function closeModal(){document.getElementById('modal').classList.remove('show');}
 
 async function saveEndpoint(){
-  const en=document.getElementById('editName').value;
-  const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai'};
-  if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
-  if(!d.model){toast('选择模型','error');return;}
-  if(en){await api('PUT',`/api/endpoints/${encodeURIComponent(en)}`,d);toast('已更新','success');}
-  else{await api('POST','/api/endpoints',d);toast('已添加','success');}
-  closeModal();refresh();
+    const ep_id=document.getElementById('editName').value;
+    const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||15,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai'};
+    if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
+    if(!d.model){toast('选择模型','error');return;}
+    if(ep_id){await api('PUT',`/api/endpoints/${encodeURIComponent(ep_id)}`,d);toast('已更新','success');}
+    else{await api('POST','/api/endpoints',d);toast('已添加','success');}
+    closeModal();refresh();
 }
 
 async function batchAddEndpoints(){
-  const fn=document.getElementById('fName').value.trim();
-  const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
-  const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||0,cd=parseInt(document.getElementById('fCooldown').value)||5,dl=parseInt(document.getElementById('fDailyLimit').value)||0,rl=parseInt(document.getElementById('fRpmLimit').value)||0,up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
-  if(!u||!k){toast('填写 URL 和 Key','error');return;}
-  if(!selectedModels.size){toast('选择模型','error');return;}
-  const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
-  const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?`${fn} - ${m}`:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,protocol:pt,start_priority:sp}});
-  if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
+    const fn=document.getElementById('fName').value.trim();
+    const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
+    const sp=parseInt(document.getElementById('fPriority').value)||1,to=parseInt(document.getElementById('fTimeout').value)||15,re=parseInt(document.getElementById('fRetries').value)||0,cd=parseInt(document.getElementById('fCooldown').value)||5,dl=parseInt(document.getElementById('fDailyLimit').value)||0,rl=parseInt(document.getElementById('fRpmLimit').value)||0,up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
+    if(!u||!k){toast('填写 URL 和 Key','error');return;}
+    if(!selectedModels.size){toast('选择模型','error');return;}
+    const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
+    const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?fn:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,protocol:pt,start_priority:sp}});
+    if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
