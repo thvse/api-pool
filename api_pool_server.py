@@ -965,14 +965,8 @@ class APIPool:
                 models.sort(key=lambda x: x["id"])
                 return models
         except Exception as e:
-            if protocol == "anthropic":
-                # Fallback to hardcoded list if Anthropic endpoint doesn't support /models
-                return [
-                    {"id": "claude-3-5-sonnet-20241022", "description": "Anthropic Claude 3.5 Sonnet"},
-                    {"id": "claude-3-5-sonnet-20240620", "description": "Anthropic Claude 3.5 Sonnet (Old)"},
-                    {"id": "claude-3-opus-20240229", "description": "Anthropic Claude 3 Opus"},
-                    {"id": "claude-3-haiku-20240307", "description": "Anthropic Claude 3 Haiku"}
-                ]
+            if protocol == "anthropic" and isinstance(e, urllib.error.HTTPError) and e.code == 404:
+                raise Exception("该端点尚未支持获取模型列表 (官方老版协议或部分代理不支持)")
             raise e
 
     def test_vision(self, base_url, api_key, model, timeout=15, use_proxy=True, protocol="openai"):
