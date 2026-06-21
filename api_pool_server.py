@@ -689,6 +689,19 @@ class APIPool:
                                                 }
                                                 yield b"data: " + json.dumps(o_chunk).encode("utf-8") + b"\n\n"
                                         elif ctype == "message_stop":
+                                            usage_chunk = {
+                                                "id": stream_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": int(time.time()),
+                                                "model": ep.model,
+                                                "choices": [],
+                                                "usage": {
+                                                    "prompt_tokens": final_prompt_tokens,
+                                                    "completion_tokens": final_completion_tokens,
+                                                    "total_tokens": final_total_tokens
+                                                }
+                                            }
+                                            yield b"data: " + json.dumps(usage_chunk).encode("utf-8") + b"\n\n"
                                             yield b"data: [DONE]\n\n"
                                         elif ctype == "message_delta" and "usage" in chunk:
                                             u = chunk["usage"]
