@@ -1296,7 +1296,7 @@ select option { background: var(--bg); color: var(--text); }
   <div class="modal">
     <h2 id="modalTitle">添加端点</h2>
     <input type="hidden" id="editName">
-    <div class="form-group"><label>名称</label><input type="text" id="fName" placeholder="主力 API"></div>
+    <div class="form-group"><label>名称</label><input type="text" id="fName" placeholder="如 OpenAI 或 DeepSeek" oninput="this.dataset.autofilled='false'"></div>
     <div class="form-group"><label>Base URL</label><input type="text" id="fUrl" placeholder="https://api.openai.com/v1" oninput="checkFetchBtn()"></div>
     <div class="form-group"><label>API Key</label><input type="password" id="fKey" placeholder="sk-..." oninput="checkFetchBtn()"></div>
     <div class="form-group">
@@ -1456,7 +1456,48 @@ async function testEndpoint(n){const m=document.getElementById('testMsg').value|
 async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
-function checkFetchBtn(){const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();document.getElementById('fetchModelsBtn').disabled=!(u&&k);}
+function checkFetchBtn(){
+    const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
+    document.getElementById('fetchModelsBtn').disabled=!(u&&k);
+    
+    const nameEl = document.getElementById('fName');
+    if (!nameEl.value || nameEl.dataset.autofilled === 'true') {
+        const provider = detectProvider(u);
+        if (provider) {
+            nameEl.value = provider;
+            nameEl.dataset.autofilled = 'true';
+        } else if (nameEl.dataset.autofilled === 'true') {
+            nameEl.value = '';
+            nameEl.dataset.autofilled = 'false';
+        }
+    }
+}
+function detectProvider(url) {
+    if(!url) return '';
+    const u = url.toLowerCase();
+    if(u.includes('api.openai.com')) return 'OpenAI';
+    if(u.includes('openrouter.ai')) return 'OpenRouter';
+    if(u.includes('api.anthropic.com')) return 'Anthropic';
+    if(u.includes('api.deepseek.com')) return 'DeepSeek';
+    if(u.includes('integrate.api.nvidia.com')) return 'NVIDIA';
+    if(u.includes('open.bigmodel.cn')) return 'BigModel';
+    if(u.includes('dashscope.aliyuncs.com')) return 'Aliyun';
+    if(u.includes('api.siliconflow.cn')) return 'SiliconFlow';
+    if(u.includes('api.moonshot.cn')) return 'Moonshot';
+    if(u.includes('api.groq.com')) return 'Groq';
+    if(u.includes('api.together.xyz')) return 'Together';
+    if(u.includes('ollama')) return 'Ollama';
+    if(u.includes('localhost') || u.includes('127.0.0.1')) return 'Local';
+    try {
+        const dom = new URL(url).hostname;
+        const parts = dom.split('.');
+        if(parts.length >= 2) {
+            let name = parts[parts.length-2];
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        }
+    }catch(e){}
+    return '';
+}
 async function fetchModels(){
   const u=document.getElementById('fUrl').value.trim(),k=document.getElementById('fKey').value.trim();
   const up=document.getElementById('fProxy').value==='true',pt=document.getElementById('fProtocol').value||'openai';
