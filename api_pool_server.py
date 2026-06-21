@@ -771,6 +771,7 @@ class APIPool:
             if is_anthropic:
                 safe_api_key = ep.api_key.encode('ascii', 'ignore').decode('ascii').strip()
                 req.add_header("x-api-key", safe_api_key)
+                req.add_header("Authorization", f"Bearer {safe_api_key}")
                 req.add_header("anthropic-version", "2023-06-01")
             else:
                 safe_api_key = ep.api_key.encode('ascii', 'ignore').decode('ascii').strip()
@@ -936,6 +937,7 @@ class APIPool:
         
         if protocol == "anthropic":
             req.add_header("x-api-key", safe_api_key)
+            req.add_header("Authorization", f"Bearer {safe_api_key}")
             req.add_header("anthropic-version", "2023-06-01")
         else:
             req.add_header("Authorization", f"Bearer {safe_api_key}")
