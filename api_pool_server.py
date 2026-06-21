@@ -217,6 +217,7 @@ token_tracker = TokenTracker()
 
 @dataclass
 class Endpoint:
+    id: str = ""
     name: str = "unnamed"
     base_url: str = ""
     api_key: str = ""
@@ -275,6 +276,9 @@ class APIPool:
     def add_endpoint(self, ep):
         if isinstance(ep, dict):
             ep = Endpoint(**{k: v for k, v in ep.items() if k in Endpoint.__dataclass_fields__})
+        if not ep.id:
+            import uuid
+            ep.id = str(uuid.uuid4())
         ep._today_date = datetime.now().strftime("%Y-%m-%d")
         ep._today_used = token_tracker.get_today_usage_by_endpoint(ep.name)
         with self._lock:
@@ -313,6 +317,7 @@ class APIPool:
 
     def _ep_to_dict(self, ep, is_current, now):
         return {
+            "id": ep.id,
             "name": ep.name,
             "base_url": ep.base_url,
             "api_key": ep.api_key[:8] + "***" if len(ep.api_key) > 8 else "***",
