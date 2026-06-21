@@ -11,3 +11,8 @@ api_config.json
 # 数据库文件
 token_stats.db
 token_stats.db-journal
+chat_logs.db
+chat_logs.db-journal
+
+# 临时脚本
+test_suite.py
