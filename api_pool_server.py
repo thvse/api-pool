@@ -987,10 +987,10 @@ def api_handler(method, path, body):
     if method == "POST" and cp == "/api/test-model": return 200, pool.test_model_latency(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True), protocol=body.get("protocol", "openai")), False
     if method == "POST" and cp == "/api/test-vision": return 200, pool.test_vision(body.get("base_url", ""), body.get("api_key", ""), body.get("model", ""), timeout=body.get("timeout", 15), use_proxy=body.get("use_proxy", True), protocol=body.get("protocol", "openai")), False
     if method == "POST" and cp == "/api/test":
-        name = body.get("name", ""); test_msg = body.get("message", "你好"); target_ep = None
+        ep_id = body.get("id", ""); test_msg = body.get("message", "你好"); target_ep = None
         for ep in pool.list_endpoints():
-            if ep["name"] == name: target_ep = ep; break
-        if not target_ep: return 404, {"error": f"端点 {name} 不存在"}, False
+            if ep["id"] == ep_id: target_ep = ep; break
+        if not target_ep: return 404, {"error": "端点不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
         test_pool.add_endpoint({"name": name, "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
         try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
@@ -1470,11 +1470,11 @@ function renderEndpoints(eps){
       <div class="ep-header">
         <div class="ep-name">${esc(ep.name)} ${b}</div>
         <div class="ep-actions">
-          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="testEndpoint('${esc(ep.name)}')">🧪</button>
-          ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${esc(ep.name)}')">⏰</button>`:''}
-          <button class="btn btn-ghost btn-sm" title="${ep.enabled?'禁用端点':'启用端点'}" onclick="toggleEndpoint('${esc(ep.name)}')">${ep.enabled?'⏸':'▶'}</button>
-          <button class="btn btn-ghost btn-sm" title="编辑端点" onclick="editEndpoint('${esc(ep.name)}')">✏️</button>
-          <button class="btn btn-ghost btn-sm" title="删除端点" onclick="deleteEndpoint('${esc(ep.name)}')" style="color:var(--red)">🗑</button>
+          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="testEndpoint('${ep.id}')">🧪</button>
+          ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${ep.id}')">⏰</button>`:''}
+          <button class="btn btn-ghost btn-sm" title="${ep.enabled?'禁用端点':'启用端点'}" onclick="toggleEndpoint('${ep.id}')">${ep.enabled?'⏸':'▶'}</button>
+          <button class="btn btn-ghost btn-sm" title="编辑端点" onclick="editEndpoint('${ep.id}')">✏️</button>
+          <button class="btn btn-ghost btn-sm" title="删除端点" onclick="deleteEndpoint('${ep.id}', '${esc(ep.name)}')" style="color:var(--red)">🗑</button>
         </div>
       </div>
       <div class="ep-meta">
@@ -1509,10 +1509,10 @@ function renderChain(chain){
 }
 
 async function runHealthCheck(){toast('正在检测...','info');const r=await api('POST','/api/health-check');if(r.ok){const o=r.results.filter(x=>x.health==='ok').length,s=r.results.filter(x=>x.health==='slow').length,b=r.results.filter(x=>x.health==='bad').length;toast(`✅${o} 🐢${s} ❌${b}`,'success');}refresh();}
-async function toggleEndpoint(n){await api('POST',`/api/endpoints/${encodeURIComponent(n)}/toggle`);refresh();}
-async function deleteEndpoint(n){if(!confirm(`删除「${n}」？`))return;await api('DELETE',`/api/endpoints/${encodeURIComponent(n)}`);toast('已删除','success');refresh();}
-async function clearCooldown(n){await api('PUT',`/api/endpoints/${encodeURIComponent(n)}`,{cooldown_minutes:0});await api('POST','/api/reset');setTimeout(async()=>{await api('PUT',`/api/endpoints/${encodeURIComponent(n)}`,{cooldown_minutes:5});refresh();},200);toast('已解除冷却','success');refresh();}
-async function testEndpoint(n){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{name:n,message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
+async function toggleEndpoint(id){await api('POST',`/api/endpoints/${encodeURIComponent(id)}/toggle`);refresh();}
+async function deleteEndpoint(id, n){if(!confirm(`删除「${n}」？`))return;await api('DELETE',`/api/endpoints/${encodeURIComponent(id)}`);toast('已删除','success');refresh();}
+async function clearCooldown(id){await api('PUT',`/api/endpoints/${encodeURIComponent(id)}`,{cooldown_minutes:0});await api('POST','/api/reset');setTimeout(async()=>{await api('PUT',`/api/endpoints/${encodeURIComponent(id)}`,{cooldown_minutes:5});refresh();},200);toast('已解除冷却','success');refresh();}
+async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
 async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
