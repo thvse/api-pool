@@ -45,6 +45,10 @@ class LogManager:
         with self.lock:
             return [log for log in self.history if log["id"] > last_id]
 
+    def clear_logs(self):
+        with self.lock:
+            self.history.clear()
+
 sys_logger = LogManager()
 def sys_log(msg, level="INFO"):
     sys_logger.log(level, msg)
@@ -208,6 +212,12 @@ class TokenTracker:
             for row in cursor.fetchall():
                 writer.writerow(row)
         return output.getvalue()
+
+    def clear_data(self):
+        with sqlite3.connect(self.db_path, timeout=5) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM token_usage")
+            conn.commit()
 
 token_tracker = TokenTracker()
 
@@ -1055,6 +1065,10 @@ def api_handler(method, path, body):
         last_id = int(qs.get("since", 0))
         return 200, sys_logger.get_logs_since(last_id), False
 
+    if method == "DELETE" and cp == "/api/logs":
+        sys_logger.clear_logs()
+        return 200, {"ok": True}, False
+
     if method == "GET" and cp == "/api/chat-logs":
         qs = dict(q.split("=") for q in parsed.query.split("&") if "=" in q) if parsed.query else {}
         limit = int(qs.get("limit", 50))
@@ -1071,6 +1085,10 @@ def api_handler(method, path, body):
         # url decode
         ep = urllib.parse.unquote(ep)
         return 200, token_tracker.get_stats(endpoint_filter=ep), False
+
+    if method == "DELETE" and cp == "/api/token-stats":
+        token_tracker.clear_data()
+        return 200, {"ok": True}, False
 
     if method == "GET" and cp == "/api/endpoints": return 200, pool.list_endpoints(), False
     if method == "GET" and cp == "/api/chain": return 200, pool.get_active_chain(), False
@@ -1366,6 +1384,7 @@ select option { background: var(--bg); color: var(--text); }
     <select id="analyticsFilter" class="btn btn-ghost" style="appearance:none; cursor:pointer; background:rgba(255,255,255,0.05);" onchange="loadAnalytics()">
         <option value="all">全端点大盘</option>
     </select>
+    <button class="btn btn-ghost" onclick="clearTokenStats()" style="color:var(--red);">🗑 清空大盘</button>
     <button class="btn btn-green" onclick="exportCSV()">📥 导出流水</button>
   </div>
 </div>
@@ -1407,7 +1426,10 @@ select option { background: var(--bg); color: var(--text); }
 </div>
 
 <div class="log-card" style="margin-top:20px;">
-  <div class="card-title"><span class="icon">📝</span> 实时日志</div>
+  <div class="card-title">
+    <span class="icon">📝</span> 实时日志
+    <button class="btn btn-ghost btn-sm" onclick="clearSysLogs()" style="color:var(--red); float:right; margin-top:-2px; padding:2px 8px;">🗑 清空</button>
+  </div>
   <div class="log-container" id="logContainer"></div>
 </div>
 </div>
@@ -2300,6 +2322,20 @@ style.innerHTML = `
   .hover-bg:hover { background: rgba(255,255,255,0.05); }
 `;
 document.head.appendChild(style);
+
+async function clearSysLogs() {
+  if (!confirm('确定要清空系统日志吗？')) return;
+  await api('DELETE', '/api/logs');
+  document.getElementById('logContainer').innerHTML = '';
+  toast('已清空日志', 'success');
+}
+
+async function clearTokenStats() {
+  if (!confirm('确定要清空所有数据大盘的 Token 统计记录吗？此操作不可逆。')) return;
+  await api('DELETE', '/api/token-stats');
+  toast('大盘数据已清空', 'success');
+  loadAnalytics();
+}
 
 </script>
 </body>
