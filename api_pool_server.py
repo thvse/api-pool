@@ -470,7 +470,7 @@ class APIPool:
     def get_active_chain(self):
         now = time.time()
         with self._lock:
-            active = [ep for ep in self._endpoints if ep.enabled]
+            active = self._active_endpoints()
             current_ep = active[self._current_idx] if active and self._current_idx < len(active) else None
             return [
                 {
@@ -1460,14 +1460,14 @@ select option { background: var(--bg); color: var(--text); }
         </div>
       </div>
       <!-- Detail View -->
-      <div style="flex:1; display:flex; flex-direction:column; gap:15px; overflow:hidden;">
-        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+      <div style="flex:1; display:flex; flex-direction:column; gap:15px; overflow:hidden; min-height:0;">
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3); min-height:0;">
           <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Prompt</div>
-          <pre id="clPrompt" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+          <pre id="clPrompt" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all; min-height:0;"></pre>
         </div>
-        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+        <div style="flex:1; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3); min-height:0;">
           <div style="padding:6px 10px; background:var(--card); font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--border);">Completion <span id="clMeta" style="float:right;"></span></div>
-          <pre id="clCompletion" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+          <pre id="clCompletion" style="flex:1; overflow-y:auto; padding:10px; margin:0; font-size:12px; white-space:pre-wrap; word-break:break-all; min-height:0;"></pre>
         </div>
       </div>
     </div>
