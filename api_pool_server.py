@@ -769,10 +769,12 @@ class APIPool:
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Content-Type", "application/json")
             if is_anthropic:
-                req.add_header("x-api-key", ep.api_key)
+                safe_api_key = ep.api_key.encode('ascii', 'ignore').decode('ascii').strip()
+                req.add_header("x-api-key", safe_api_key)
                 req.add_header("anthropic-version", "2023-06-01")
             else:
-                req.add_header("Authorization", f"Bearer {ep.api_key}")
+                safe_api_key = ep.api_key.encode('ascii', 'ignore').decode('ascii').strip()
+                req.add_header("Authorization", f"Bearer {safe_api_key}")
                 
             for k, v in ep.extra_headers.items():
                 req.add_header(k, v)
@@ -938,7 +940,8 @@ class APIPool:
             
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
-        req.add_header("Authorization", f"Bearer {api_key}")
+        safe_api_key = api_key.encode('ascii', 'ignore').decode('ascii').strip()
+        req.add_header("Authorization", f"Bearer {safe_api_key}")
         
         if not use_proxy:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
