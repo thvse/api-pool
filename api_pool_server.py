@@ -600,7 +600,7 @@ class APIPool:
                 sys_log(f"视觉转译失败 ({v_ep.name}): {error}", "WARNING")
                 continue
                 
-            description = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            description = result if isinstance(result, str) else result.get("choices", [{}])[0].get("message", {}).get("content", "")
             if description:
                 break
                 
