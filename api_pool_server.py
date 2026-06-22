@@ -1,4 +1,4 @@
-"""
+﻿"""
 API Pool — 聚合 API 自动切换模块（GUI 版）
 
 启动: python api_pool_server.py
@@ -1754,7 +1754,7 @@ function renderEndpoints(eps){
     else b+=`<span class="badge badge-priority" style="background:rgba(16,163,127,0.2);color:#2ecc71" title="OpenAI 兼容协议">🟢OpenAI</span>`;
     if(ep.is_current)b+='<span class="badge badge-current">● 当前</span>';
     if(!ep.enabled)b+='<span class="badge badge-disabled">禁用</span>';
-      if(ep.is_vision!==false)b+=`<span class=\"badge\" style=\"background:rgba(0,122,255,.15);color:#0a84ff\" title=\"原生支持视觉能力\">👁️读图</span>`;
+      if(ep.is_vision!==false)b+=`<span class=\"badge\" style=\"background:rgba(0,122,255,.15);color:#0a84ff\" title=\"原生支持视觉能力\">👁️视觉</span>`;
     if(ep.is_rpm_limited)b+=`<span class="badge badge-cooldown" title="每分钟并发已满，限流降级中">🚧限流中</span>`;
     else if(ep.daily_limit>0&&ep.today_used>=ep.daily_limit)b+=`<span class="badge badge-cooldown" title="今日额度已满，挂起至明日">🛑额度耗尽</span>`;
     else if(ep.in_cooldown)b+=`<span class="badge badge-cooldown">⏳${fmtTime(ep.cooldown_remaining)}</span>`;
