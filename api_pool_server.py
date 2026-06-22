@@ -1537,7 +1537,7 @@ select option { background: var(--bg); color: var(--text); }
       <div class="chain-list" id="chainList"></div>
     </div>
     <div class="card">
-      <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;"><div><span class="icon">🧪</span> 测试场 (Playground)</div><select id="testTarget" style="background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 5px; font-size:11px; outline:none; max-width:140px; text-overflow:ellipsis;"><option value="pool">🌟 聚合调度 (Pool)</option></select></div>
+      <div class="card-title"><span class="icon">🧪</span> 测试</div>
       <div class="test-input-row" style="display:flex; gap:8px;">
         <input type="text" id="testMsg" placeholder="测试消息..." value="用一句话介绍自己" style="flex:1">
         <input type="file" id="testImage" accept="image/*" style="display:none;" onchange="previewTestImage(this)">
@@ -1765,17 +1765,6 @@ function renderEndpoints(eps){
   const c=document.getElementById('filterCount');if(c)c.textContent=`${eps.length} 个`;
   const el=document.getElementById('epList');
   if(!eps.length){el.innerHTML='<div class="empty">暂无端点</div>';return;}
-  const tt=document.getElementById('testTarget');
-  if(tt){
-    const currentVal=tt.value;
-    tt.innerHTML='<option value="pool">🌟 聚合调度 (Pool)</option>';
-    eps.forEach(ep=>{
-      const opt=document.createElement('option');
-      opt.value=ep.id; opt.textContent=`${ep.name} (${ep.model})`;
-      tt.appendChild(opt);
-    });
-    if(Array.from(tt.options).some(o=>o.value===currentVal))tt.value=currentVal;
-  }
   el.innerHTML=eps.map(ep=>{
     let cls='ep-item';
     if(!ep.enabled)cls+=' disabled';
@@ -1865,29 +1854,8 @@ function clearTestImage() {
   if (btn) { btn.style.background = 'transparent'; btn.title = '上传图片测试'; }
 }
 
-async function testPool(){
-  const tt=document.getElementById('testTarget');
-  const targetId=tt?tt.value:'pool';
-  const m=document.getElementById('testMsg').value||'你好';
-  toast('发送测试中...','info');
-  let r;
-  if(targetId==='pool'){
-    r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});
-  } else {
-    r=await api('POST','/api/test',{id:targetId,message:m,image:testImageBase64});
-  }
-  const el=document.getElementById('testResult');
-  if(r.ok){
-    el.className='test-result success';
-    el.textContent='✅ '+r.result+(r.served_by?'
-[响应: '+r.served_by+']':'');
-  }else{
-    el.className='test-result failure';
-    el.textContent='❌ '+(r.error||r.errors?.join('
-'));
-  }
-  refresh();
-});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
+async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[模型: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
+async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
 function checkFetchBtn(){
