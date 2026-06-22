@@ -1647,6 +1647,11 @@ select option { background: var(--bg); color: var(--text); }
       <div class="form-group"><label>重试次数</label><input type="number" id="fRetries" value="0" min="0"></div>
       <div class="form-group"><label>冷却 (分钟)</label><input type="number" id="fCooldown" value="5" min="0"></div>
     </div>
+      <div class="form-group" style="margin-top: 5px;">
+        <label style="cursor:pointer; display:flex; align-items:center; gap:5px; font-size:13px;">
+          <input type="checkbox" id="fVision" checked> 👁️ 支持视觉输入 (Vision Support)
+        </label>
+      </div>
     <div class="form-row">
       <div class="form-group"><label>启用</label><select id="fEnabled"><option value="true">是</option><option value="false">否</option></select></div>
       <div class="form-group"><label title="达到额度后挂起，0为不限制">每日额度 (0不限)</label><input type="number" id="fDailyLimit" value="0" min="0"></div>
