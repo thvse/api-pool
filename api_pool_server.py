@@ -725,7 +725,7 @@ class APIPool:
                 self._current_idx = i
                 return
 
-    def chat(self, messages, model=None, extra_payload=None, timeout=None):
+    def chat(self, messages, model=None, extra_payload=None, timeout=None, return_endpoint=False):
         active = self._active_endpoints()
         if not active:
             raise ValueError("没有可用的 API 端点")
@@ -777,6 +777,7 @@ class APIPool:
                 with self._lock:
                     self._on_success(ep)
                 sys_log(f"端点 '{ep.name}' 请求成功 (延迟: 正常)", "INFO")
+                if return_endpoint: return result, ep
                 return result
             errors.append(f"[{ep.name}] {error}")
             sys_log(f"端点 '{ep.name}' 请求失败: {error}", "ERROR")
@@ -1249,14 +1250,20 @@ def api_handler(method, path, body):
         if not target_ep: return 404, {"error": "端点不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
         test_pool.add_endpoint({"name": target_ep["name"], "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
-        try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
+        try:
+            res_dict, served_ep = test_pool.chat([{"role": "user", "content": test_msg}], return_endpoint=True)
+            res_str = res_dict.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(res_dict, dict) else res_dict
+            return 200, {"ok": True, "result": res_str, "served_by": f"{served_ep.name} ({served_ep.model})"}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/test-pool":
         test_msg = body.get("message", "你好")
         img = body.get("image")
         if img:
             test_msg = [{"type": "text", "text": test_msg}, {"type": "image_url", "image_url": {"url": img}}]
-        try: return 200, {"ok": True, "result": pool.chat([{"role": "user", "content": test_msg}])}, False
+        try:
+            res_dict, served_ep = pool.chat([{"role": "user", "content": test_msg}], return_endpoint=True)
+            res_str = res_dict.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(res_dict, dict) else res_dict
+            return 200, {"ok": True, "result": res_str, "served_by": f"{served_ep.name} ({served_ep.model})"}, False
         except AllEndpointsFailed as e: return 200, {"ok": False, "errors": e.errors}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/reset": pool.reset(); return 200, {"ok": True}, False
@@ -1817,8 +1824,29 @@ async function runHealthCheck(){toast('正在检测...','info');const r=await ap
 async function toggleEndpoint(id){await api('POST',`/api/endpoints/${encodeURIComponent(id)}/toggle`);refresh();}
 async function deleteEndpoint(id, n){if(!confirm(`删除「${n}」？`))return;await api('DELETE',`/api/endpoints/${encodeURIComponent(id)}`);toast('已删除','success');refresh();}
 async function clearCooldown(id){await api('PUT',`/api/endpoints/${encodeURIComponent(id)}`,{cooldown_minutes:0});await api('POST','/api/reset');setTimeout(async()=>{await api('PUT',`/api/endpoints/${encodeURIComponent(id)}`,{cooldown_minutes:5});refresh();},200);toast('已解除冷却','success');refresh();}
-async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
-async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result;}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
+let testImageBase64 = null;
+function previewTestImage(input) {
+  if (input.files && input.files[0]) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      testImageBase64 = e.target.result;
+      const btn = document.getElementById('btnTestImage');
+      if(btn) { btn.style.background = 'rgba(50,215,75,0.2)'; btn.title = '已附加图片'; }
+      toast('图片已附加', 'success');
+    };
+    reader.readAsDataURL(input.files[0]);
+  }
+}
+function clearTestImage() {
+  testImageBase64 = null;
+  const input = document.getElementById('testImage');
+  if (input) input.value = '';
+  const btn = document.getElementById('btnTestImage');
+  if (btn) { btn.style.background = 'transparent'; btn.title = '上传图片测试'; }
+}
+
+async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m,image:testImageBase64});clearTestImage();const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[模型: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
+async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});clearTestImage();const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
 function checkFetchBtn(){
