@@ -595,7 +595,7 @@ class APIPool:
         for v_ep in vision_eps:
             sys_log(f"启动视觉转译 -> 尝试端点 {v_ep.name} ({v_ep.model})", "INFO")
             payload = {"model": v_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
-            result, error = self._try_endpoint(v_ep, payload, timeout=60, log_usage=False, force_no_retry=True)
+            result, error = self._try_endpoint(v_ep, payload, timeout=60, log_usage=True, force_no_retry=True)
             if error:
                 sys_log(f"视觉转译失败 ({v_ep.name} - {v_ep.model}): {error}", "WARNING")
                 continue
