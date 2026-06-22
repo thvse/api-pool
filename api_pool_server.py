@@ -567,8 +567,11 @@ class APIPool:
                     if c.get("type") == "image_url": return True
         return False
 
-    def _translate_images_sync(self, messages, vision_ep):
-        sys_log(f"启动视觉转译 -> 使用端点 {vision_ep.name}", "INFO")
+    def _translate_images_sync(self, messages, active_eps):
+        vision_eps = [e for e in active_eps if getattr(e, "is_vision", True)]
+        if not vision_eps:
+            return messages
+            
         translation_msgs = []
         for m in messages:
             if isinstance(m.get("content"), list):
@@ -586,14 +589,22 @@ class APIPool:
         sys_prompt = "你是一个专业图像解析器。请将用户提供的图片内容转化为极其详细的文字描述（包括画面细节、OCR文字、代码片段等），只输出文字描述，不要有多余的客套话。"
         translation_msgs.insert(0, {"role": "system", "content": sys_prompt})
         
-        payload = {"model": vision_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
-        result, error = self._try_endpoint(vision_ep, payload, timeout=60, log_usage=False, force_no_retry=True)
-        if error:
-            sys_log(f"视觉转译失败: {error}", "ERROR")
+        description = ""
+        for v_ep in vision_eps:
+            sys_log(f"启动视觉转译 -> 尝试端点 {v_ep.name}", "INFO")
+            payload = {"model": v_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
+            result, error = self._try_endpoint(v_ep, payload, timeout=60, log_usage=False, force_no_retry=True)
+            if error:
+                sys_log(f"视觉转译失败 ({v_ep.name}): {error}", "WARNING")
+                continue
+                
+            description = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if description:
+                break
+                
+        if not description:
+            sys_log("所有视觉转译端点均失败", "ERROR")
             return messages
-            
-        description = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not description: return messages
         
         import copy
         new_msgs = copy.deepcopy(messages)
@@ -734,14 +745,14 @@ class APIPool:
             
             # [VISION TRANSLATION INTERCEPT]
             if self._has_images(payload["messages"]) and getattr(ep, "is_vision", True) is False:
-                vision_ep = next((e for e in active if getattr(e, "is_vision", True)), None)
-                if vision_ep:
+                has_vision = any(getattr(e, "is_vision", True) for e in active)
+                if has_vision:
                     if payload.get("stream"):
-                        def vision_wrapper(tgt_ep, pld, t_out, v_ep):
+                        def vision_wrapper(tgt_ep, pld, t_out, a_eps):
                             import json
-                            yield f"data: {{'choices':[{{'delta':{{'content':'[API Pool: 正在调度 {v_ep.name} 进行视觉转译...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
-                            translated_msgs = self._translate_images_sync(pld["messages"], v_ep)
-                            yield f"data: {{'choices':[{{'delta':{{'content':'[视觉转译完成，交由当前模型深度思考...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[API Pool: 检测到图片，当前目标不支持视觉，正在按优先级链调度多模态模型进行转译...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            translated_msgs = self._translate_images_sync(pld["messages"], a_eps)
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[视觉转译流程结束，交由当前模型深度思考...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
                             pld["messages"] = translated_msgs
                             gen, err = self._try_endpoint(tgt_ep, pld, t_out)
                             if err:
@@ -750,9 +761,9 @@ class APIPool:
                                 yield from gen
                         with self._lock:
                             self._on_success(ep)
-                        return vision_wrapper()
+                        return vision_wrapper(ep, payload, ep_timeout, active)
                     else:
-                        payload["messages"] = self._translate_images_sync(payload["messages"], vision_ep)
+                        payload["messages"] = self._translate_images_sync(payload["messages"], active)
             
             if tried == 0:
                 sys_log(f"收到 API 请求，尝试请求端点 '{ep.name}' (模型: {ep_model})", "INFO")
@@ -1498,9 +1509,14 @@ select option { background: var(--bg); color: var(--text); }
   </div>
   <div>
     <div class="card" style="margin-bottom:16px">
-      <div class="card-title"><span class="icon">🔗</span> 聚合链</div>
+      <div class="card-title"><span class="icon">🔗</span> 聚合链 (全局)</div>
       <div style="font-size:10px;color:var(--text-dim);margin-bottom:10px">遇 429/超时自动切换 · 冷却到期自动切回</div>
       <div class="chain-list" id="chainList"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title"><span class="icon">👁️</span> 视觉解析链 (转译专属)</div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:10px">目标不支持读图时触发 · 按顺位拦截解析</div>
+      <div class="chain-list" id="visionChainList"></div>
     </div>
     <div class="card">
       <div class="card-title"><span class="icon">🧪</span> 测试</div>
@@ -1770,27 +1786,29 @@ function renderEndpoints(eps){
   }).join('');
 }
 
-function renderChain(chain){
-  const el=document.getElementById('chainList');
-  if(!chain.length){el.innerHTML='<div class="empty">没有启用的端点</div>';return;}
-  el.innerHTML=chain.map((it,i)=>{
+function _renderChainHTML(chainItems) {
+  if(!chainItems.length) return '<div class="empty">没有启用的端点</div>';
+  return chainItems.map((it,i)=>{
     let cls='chain-item';
-    if(it.is_current)cls+=' active';
     if(it.in_cooldown)cls+=' cooldown';
-    else if(it.health==='bad')cls+=' failed';
-    const h=it.health,lat=it.health_latency_ms;
+    else if(it.is_current)cls+=' active';
+    else if(it.health==='bad'||it.fail_count>0)cls+=' failed';
+    const st=it.in_cooldown?'<span class="badge badge-warning">冷却中</span>':(it.is_current?'<span class="badge badge-success">服务中</span>':'');
+    const h=it.health, lat=it.health_latency_ms;
     let rh='';
-    if(h==='ok')rh=`<div class="chain-health" style="color:var(--green)">✅${lat>=0?' '+lat+'ms':''}</div>`;
+    if(h==='ok')rh=`<div class="chain-health" style="color:var(--green)">✓${lat>=0?' '+lat+'ms':''}</div>`;
     else if(h==='slow')rh=`<div class="chain-health" style="color:var(--yellow)">🐢${lat>=0?' '+lat+'ms':''}</div>`;
-    else if(h==='bad'){rh=`<div class="chain-health" style="color:var(--red)">❌${lat>=0?' '+lat+'ms':''}</div>`;if(it.health_error)rh+=`<div class="chain-err" title="${esc(it.health_error)}">${esc(it.health_error)}</div>`;}
-    else if(h==='testing')rh='<div class="chain-health" style="color:var(--text-dim)">⏳</div>';
-    else rh='<div class="chain-health" style="color:var(--text-dim)">❓</div>';
-    let st='';
-    if(it.is_current)st='<span style="color:var(--green);font-size:10px">← 当前</span>';
-    else if(it.in_cooldown)st=`<span style="color:var(--yellow);font-size:10px">⏳${fmtTime(it.cooldown_remaining)}</span>`;
-    const conn=i<chain.length-1?'<div class="chain-connector"></div>':'';
+    else if(h==='bad'){rh=`<div class="chain-health" style="color:var(--red)">✗${lat>=0?' '+lat+'ms':''}</div>`;if(it.health_error)rh+=`<div class="chain-err" title="${esc(it.health_error)}">${esc(it.health_error)}</div>`;}
+    else if(h==='testing')rh='<div class="chain-health" style="color:var(--text-dim)">…</div>';
+    else rh='<div class="chain-health" style="color:var(--text-dim)">-</div>';
+    const conn=i<chainItems.length-1?'<div class="chain-connector"></div>':'';
     return`<div class="${cls}"><div class="chain-dot"></div><div class="chain-info"><div class="name">${esc(it.name)} ${st}</div><div class="model">${esc(it.model)}</div></div><div class="chain-right">${rh}</div></div>${conn}`;
   }).join('');
+}
+function renderChain(chain){
+  document.getElementById('chainList').innerHTML=_renderChainHTML(chain);
+  const vChain = chain.filter(c => c.is_vision !== false);
+  document.getElementById('visionChainList').innerHTML=_renderChainHTML(vChain);
 }
 
 async function runHealthCheck(){toast('正在检测...','info');const r=await api('POST','/api/health-check');if(r.ok){const o=r.results.filter(x=>x.health==='ok').length,s=r.results.filter(x=>x.health==='slow').length,b=r.results.filter(x=>x.health==='bad').length;toast(`✅${o} 🐢${s} ❌${b}`,'success');}refresh();}
