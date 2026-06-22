@@ -1509,14 +1509,9 @@ select option { background: var(--bg); color: var(--text); }
   </div>
   <div>
     <div class="card" style="margin-bottom:16px">
-      <div class="card-title"><span class="icon">🔗</span> 聚合链 (全局)</div>
+      <div class="card-title"><span class="icon">🔗</span> 聚合链</div>
       <div style="font-size:10px;color:var(--text-dim);margin-bottom:10px">遇 429/超时自动切换 · 冷却到期自动切回</div>
       <div class="chain-list" id="chainList"></div>
-    </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title"><span class="icon">👁️</span> 视觉解析链 (转译专属)</div>
-      <div style="font-size:10px;color:var(--text-dim);margin-bottom:10px">目标不支持读图时触发 · 按顺位拦截解析</div>
-      <div class="chain-list" id="visionChainList"></div>
     </div>
     <div class="card">
       <div class="card-title"><span class="icon">🧪</span> 测试</div>
@@ -1758,6 +1753,7 @@ function renderEndpoints(eps){
     else b+=`<span class="badge badge-priority" style="background:rgba(16,163,127,0.2);color:#2ecc71" title="OpenAI 兼容协议">🟢OpenAI</span>`;
     if(ep.is_current)b+='<span class="badge badge-current">● 当前</span>';
     if(!ep.enabled)b+='<span class="badge badge-disabled">禁用</span>';
+      if(ep.is_vision!==false)b+=`<span class=\"badge\" style=\"background:rgba(0,122,255,.15);color:#0a84ff\" title=\"原生支持视觉能力\">👁️读图</span>`;
     if(ep.is_rpm_limited)b+=`<span class="badge badge-cooldown" title="每分钟并发已满，限流降级中">🚧限流中</span>`;
     else if(ep.daily_limit>0&&ep.today_used>=ep.daily_limit)b+=`<span class="badge badge-cooldown" title="今日额度已满，挂起至明日">🛑额度耗尽</span>`;
     else if(ep.in_cooldown)b+=`<span class="badge badge-cooldown">⏳${fmtTime(ep.cooldown_remaining)}</span>`;
@@ -1786,9 +1782,10 @@ function renderEndpoints(eps){
   }).join('');
 }
 
-function _renderChainHTML(chainItems) {
-  if(!chainItems.length) return '<div class="empty">没有启用的端点</div>';
-  return chainItems.map((it,i)=>{
+function renderChain(chain){
+  const el=document.getElementById('chainList');
+  if(!chain.length){el.innerHTML='<div class="empty">没有启用的端点</div>';return;}
+  el.innerHTML=chain.map((it,i)=>{
     let cls='chain-item';
     if(it.in_cooldown)cls+=' cooldown';
     else if(it.is_current)cls+=' active';
@@ -1801,14 +1798,10 @@ function _renderChainHTML(chainItems) {
     else if(h==='bad'){rh=`<div class="chain-health" style="color:var(--red)">✗${lat>=0?' '+lat+'ms':''}</div>`;if(it.health_error)rh+=`<div class="chain-err" title="${esc(it.health_error)}">${esc(it.health_error)}</div>`;}
     else if(h==='testing')rh='<div class="chain-health" style="color:var(--text-dim)">…</div>';
     else rh='<div class="chain-health" style="color:var(--text-dim)">-</div>';
-    const conn=i<chainItems.length-1?'<div class="chain-connector"></div>':'';
-    return`<div class="${cls}"><div class="chain-dot"></div><div class="chain-info"><div class="name">${esc(it.name)} ${st}</div><div class="model">${esc(it.model)}</div></div><div class="chain-right">${rh}</div></div>${conn}`;
+    const conn=i<chain.length-1?'<div class="chain-connector"></div>':'';
+    const vis = (it.is_vision !== false) ? '<span class="badge" style="background:rgba(0,122,255,.15);color:#0a84ff" title="支持原生视觉">👁️视觉</span>' : '';
+    return`<div class="${cls}"><div class="chain-dot"></div><div class="chain-info"><div class="name">${esc(it.name)} ${st}</div><div class="model">${esc(it.model)} ${vis}</div></div><div class="chain-right">${rh}</div></div>${conn}`;
   }).join('');
-}
-function renderChain(chain){
-  document.getElementById('chainList').innerHTML=_renderChainHTML(chain);
-  const vChain = chain.filter(c => c.is_vision !== false);
-  document.getElementById('visionChainList').innerHTML=_renderChainHTML(vChain);
 }
 
 async function runHealthCheck(){toast('正在检测...','info');const r=await api('POST','/api/health-check');if(r.ok){const o=r.results.filter(x=>x.health==='ok').length,s=r.results.filter(x=>x.health==='slow').length,b=r.results.filter(x=>x.health==='bad').length;toast(`✅${o} 🐢${s} ❌${b}`,'success');}refresh();}
