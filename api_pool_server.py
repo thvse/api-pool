@@ -1854,8 +1854,8 @@ function clearTestImage() {
   if (btn) { btn.style.background = 'transparent'; btn.title = '上传图片测试'; }
 }
 
-async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m,image:testImageBase64});clearTestImage();const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[模型: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
-async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});clearTestImage();const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
+async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[模型: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
+async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
 function checkFetchBtn(){
