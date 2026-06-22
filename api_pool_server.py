@@ -353,6 +353,7 @@ class Endpoint:
     use_proxy: bool = True
     protocol: str = "openai"
     extra_headers: dict = field(default_factory=dict)
+    is_vision: bool = True
 
     _fail_count: int = field(default=0, repr=False)
     _req_timestamps: deque = field(default_factory=deque, repr=False)
@@ -557,6 +558,60 @@ class APIPool:
         else:
             return ep.id, "bad", latency, err_str or "未知错误"
 
+    def _has_images(self, messages):
+        if not messages: return False
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                for c in content:
+                    if c.get("type") == "image_url": return True
+        return False
+
+    def _translate_images_sync(self, messages, vision_ep):
+        sys_log(f"启动视觉转译 -> 使用端点 {vision_ep.name}", "INFO")
+        translation_msgs = []
+        for m in messages:
+            if isinstance(m.get("content"), list):
+                new_content = []
+                has_image = False
+                for c in m["content"]:
+                    if c.get("type") == "image_url":
+                        has_image = True
+                        new_content.append(c)
+                if has_image:
+                    translation_msgs.append({"role": "user", "content": new_content})
+        
+        if not translation_msgs: return messages
+        
+        sys_prompt = "你是一个专业图像解析器。请将用户提供的图片内容转化为极其详细的文字描述（包括画面细节、OCR文字、代码片段等），只输出文字描述，不要有多余的客套话。"
+        translation_msgs.insert(0, {"role": "system", "content": sys_prompt})
+        
+        payload = {"model": vision_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
+        result, error = self._try_endpoint(vision_ep, payload, timeout=60, log_usage=False, force_no_retry=True)
+        if error:
+            sys_log(f"视觉转译失败: {error}", "ERROR")
+            return messages
+            
+        description = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not description: return messages
+        
+        import copy
+        new_msgs = copy.deepcopy(messages)
+        for m in new_msgs:
+            if isinstance(m.get("content"), list):
+                has_image = False
+                filtered_content = []
+                for c in m["content"]:
+                    if c.get("type") != "image_url":
+                        filtered_content.append(c)
+                    else:
+                        has_image = True
+                if has_image:
+                    filtered_content.append({"type": "text", "text": f"\n\n[视觉转译内容]: {description}"})
+                m["content"] = filtered_content
+        sys_log("视觉转译完成", "INFO")
+        return new_msgs
+
     def check_all_health(self):
         with self._lock:
             endpoints = [ep for ep in self._endpoints if ep.enabled]
@@ -676,6 +731,29 @@ class APIPool:
                 "model": ep_model, "messages": messages,
                 **self.default_payload, **(extra_payload or {}),
             }
+            
+            # [VISION TRANSLATION INTERCEPT]
+            if self._has_images(payload["messages"]) and getattr(ep, "is_vision", True) is False:
+                vision_ep = next((e for e in active if getattr(e, "is_vision", True)), None)
+                if vision_ep:
+                    if payload.get("stream"):
+                        def vision_wrapper(tgt_ep, pld, t_out, v_ep):
+                            import json
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[API Pool: 正在调度 {v_ep.name} 进行视觉转译...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            translated_msgs = self._translate_images_sync(pld["messages"], v_ep)
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[视觉转译完成，交由当前模型深度思考...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            pld["messages"] = translated_msgs
+                            gen, err = self._try_endpoint(tgt_ep, pld, t_out)
+                            if err:
+                                yield f"data: {{'choices':[{{'delta':{{'content':'\\n\\n[API Pool Error: 请求最终目标失败: {err}]'}}}}]}}\n\n".replace("'", '"')
+                            else:
+                                yield from gen
+                        with self._lock:
+                            self._on_success(ep)
+                        return vision_wrapper()
+                    else:
+                        payload["messages"] = self._translate_images_sync(payload["messages"], vision_ep)
+            
             if tried == 0:
                 sys_log(f"收到 API 请求，尝试请求端点 '{ep.name}' (模型: {ep_model})", "INFO")
             else:
@@ -1871,7 +1949,7 @@ async function testSelectedVision(){
 function openAddModal(){
     document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
     ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=60;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';document.getElementById('fHealthMode').value='chat';
+    document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=60;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';document.getElementById('fHealthMode').value='chat';document.getElementById('fVision').checked=true;
     document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
     document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
     allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
@@ -1881,7 +1959,7 @@ function editEndpoint(id){
     api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.id===id);if(!ep)return;
         document.getElementById('editName').value=id;document.getElementById('modalTitle').textContent='编辑端点';
         document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
-        document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';document.getElementById('fHealthMode').value=ep.health_mode||'chat';
+        document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';document.getElementById('fHealthMode').value=ep.health_mode||'chat';document.getElementById('fVision').checked=ep.is_vision!==false;
         document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
         allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
     });
@@ -1890,7 +1968,7 @@ function closeModal(){document.getElementById('modal').classList.remove('show');
 
 async function saveEndpoint(){
     const ep_id=document.getElementById('editName').value;
-    const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||60,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai',health_mode:document.getElementById('fHealthMode').value||'chat'};
+    const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||60,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai',health_mode:document.getElementById('fHealthMode').value||'chat',is_vision:document.getElementById('fVision').checked};
     if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
     if(!d.model){toast('选择模型','error');return;}
     if(ep_id){await api('PUT',`/api/endpoints/${encodeURIComponent(ep_id)}`,d);toast('已更新','success');}
