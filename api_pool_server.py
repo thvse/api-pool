@@ -725,7 +725,30 @@ class APIPool:
                 self._current_idx = i
                 return
 
+    def _preprocess_local_images(self, messages):
+        import base64, os
+        import copy
+        msgs = copy.deepcopy(messages)
+        for m in msgs:
+            if isinstance(m.get("content"), list):
+                for c in m["content"]:
+                    if c.get("type") == "image_url":
+                        url_val = c.get("image_url", {}).get("url", "")
+                        if os.path.isfile(url_val):
+                            try:
+                                with open(url_val, "rb") as f_img:
+                                    b64_data = base64.b64encode(f_img.read()).decode('utf-8')
+                                ext = os.path.splitext(url_val)[1].lower().strip('.')
+                                mime = "image/jpeg"
+                                if ext == "png": mime = "image/png"
+                                elif ext in ("gif", "webp"): mime = f"image/{ext}"
+                                c["image_url"]["url"] = f"data:{mime};base64,{b64_data}"
+                            except Exception as e:
+                                sys_log(f"读取本地图片失败: {url_val} ({e})", "WARNING")
+        return msgs
+
     def chat(self, messages, model=None, extra_payload=None, timeout=None, return_endpoint=False):
+        messages = self._preprocess_local_images(messages)
         active = self._active_endpoints()
         if not active:
             raise ValueError("没有可用的 API 端点")
