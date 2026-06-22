@@ -164,33 +164,37 @@ class TokenTracker:
                 trend_today_hourly.append({"date": f"{h_str}:00", "tokens": val[0] or 0, "calls": val[1] or 0, "missed": missed})
                 
             cursor.execute(f"""
-                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*)
+                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*), SUM(prompt_tokens), SUM(cached_tokens)
                 FROM token_usage
                 WHERE timestamp >= datetime(date('now', 'localtime'), 'utc'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """, params)
-            today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0} for r in cursor.fetchall()]
+            today_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0, "cache_hit_rate": round((r[5] or 0)/(r[4] or 1)*100, 1) if (r[4] or 0) > 0 else 0} for r in cursor.fetchall()]
             
             cursor.execute(f"""
-                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*)
+                SELECT endpoint_name, model, SUM(total_tokens), COUNT(*), SUM(prompt_tokens), SUM(cached_tokens)
                 FROM token_usage
                 WHERE strftime('%Y-%m', timestamp, 'localtime') = strftime('%Y-%m', 'now', 'localtime'){ep_cond}
                 GROUP BY endpoint_name, model
                 ORDER BY SUM(total_tokens) DESC
             """, params)
-            month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0} for r in cursor.fetchall()]
+            month_endpoints = [{"endpoint": r[0] or "未知端点", "model": r[1], "tokens": r[2] or 0, "calls": r[3] or 0, "cache_hit_rate": round((r[5] or 0)/(r[4] or 1)*100, 1) if (r[4] or 0) > 0 else 0} for r in cursor.fetchall()]
 
             cursor.execute("SELECT DISTINCT endpoint_name FROM token_usage WHERE endpoint_name IS NOT NULL")
             all_endpoints_list = [r[0] for r in cursor.fetchall()]
 
             return {
                 "today": today,
+                "today_cached": today_cached,
+                "today_missed": max(0, today_prompt - today_cached),
                 "today_calls": today_calls,
                 "today_cache_hit_rate": today_cache_hit_rate,
                 "last_3_days": last_3_days,
                 "last_7_days": last_7_days,
                 "last_30_days": last_30_days,
+                "month_cached": month_cached,
+                "month_missed": max(0, month_prompt - month_cached),
                 "month_calls": month_calls,
                 "month_cache_hit_rate": month_cache_hit_rate,
                 "trend_14d": trend_14d,
@@ -2181,7 +2185,10 @@ function renderTblData(containerId, data, key) {
                     <div class="tbl-progress-bar" style="width: ${(d[key]/maxVal*100).toFixed(1)}%;"></div>
                     <div class="tbl-content">
                         <div><div style="font-size:10px; color:var(--text-dim); margin-bottom:2px;">${esc(d.endpoint)}</div><code>${esc(d.model)}</code></div>
-                        <div style="text-align:right; font-family: monospace; font-weight:600;">${fmtNum(d[key])}</div>
+                        <div style="text-align:right;">
+                            <div style="font-family: monospace; font-weight:600;">${fmtNum(d[key])}</div>
+                            <div style="font-size:9px; color:var(--purple); margin-top:2px;">命中率 ${d.cache_hit_rate||0}%</div>
+                        </div>
                     </div>
                 </div>
             </td>
