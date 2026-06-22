@@ -1,4 +1,4 @@
-﻿"""
+"""
 API Pool — 聚合 API 自动切换模块（GUI 版）
 
 启动: python api_pool_server.py
@@ -456,6 +456,7 @@ class APIPool:
             "use_proxy": ep.use_proxy,
             "protocol": ep.protocol,
             "health_mode": ep.health_mode,
+            "is_vision": ep.is_vision,
             "is_rpm_limited": self._is_rpm_limited(ep),
             "fail_count": ep._fail_count,
             "last_error": ep._last_error,
@@ -491,6 +492,7 @@ class APIPool:
                     "rpm_limit": ep.rpm_limit,
                     "use_proxy": ep.use_proxy,
                     "is_rpm_limited": self._is_rpm_limited(ep),
+                    "is_vision": ep.is_vision,
                     "health": ep._health,
                     "health_latency_ms": ep._health_latency_ms,
                     "health_error": ep._health_error,
