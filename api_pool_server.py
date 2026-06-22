@@ -1484,7 +1484,15 @@ select option { background: var(--bg); color: var(--text); }
 .seg-btn { padding:3px 12px; border-radius:5px; font-size:11px; font-weight:600; cursor:pointer; color:var(--text-dim); transition:all 0.2s; }
 .seg-btn:hover { color:var(--text); }
 .seg-btn.active { background:rgba(255,255,255,0.1); color:#fff; box-shadow:0 2px 4px rgba(0,0,0,0.2); }
+
+#testDrawer {
+  position: fixed; right: 20px; bottom: 20px; width: 360px; background: rgba(20,20,20,0.85); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); z-index: 1000; display: flex; flex-direction: column; transform: translateY(150%); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+#testDrawer.show { transform: translateY(0); }
+.drawer-header { padding: 12px 16px; background: rgba(255,255,255,0.05); border-bottom: 1px solid var(--border); border-top-left-radius: 12px; border-top-right-radius: 12px; display: flex; justify-content: space-between; align-items: center; font-weight: bold; font-size: 13px; }
+.drawer-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 </style>
+
 </head>
 <body>
 
@@ -1500,7 +1508,7 @@ select option { background: var(--bg); color: var(--text); }
     <button class="btn btn-ghost" onclick="runHealthCheck()">🩺 健康检测</button>
     <button class="btn btn-ghost" onclick="resetPool()">🔄 重置</button>
     <button class="btn btn-primary" onclick="openAddModal()">＋ 添加端点</button>
-    <button class="btn btn-green" onclick="testPool()">🧪 测试聚合池</button>
+    <button class="btn btn-green" onclick="openTestDrawer('pool', '')">🧪 测试聚合池</button>
   </div>
   <div class="header-actions" id="analyticsActions" style="display:none;">
     <select id="analyticsFilter" class="btn btn-ghost" style="appearance:none; cursor:pointer; background:rgba(255,255,255,0.05);" onchange="loadAnalytics()">
@@ -1536,16 +1544,7 @@ select option { background: var(--bg); color: var(--text); }
       <div style="font-size:10px;color:var(--text-dim);margin-bottom:10px">遇 429/超时自动切换 · 冷却到期自动切回</div>
       <div class="chain-list" id="chainList"></div>
     </div>
-    <div class="card">
-      <div class="card-title"><span class="icon">🧪</span> 测试</div>
-      <div class="test-input-row" style="display:flex; gap:8px;">
-        <input type="text" id="testMsg" placeholder="测试消息..." value="用一句话介绍自己" style="flex:1">
-        <input type="file" id="testImage" accept="image/*" style="display:none;" onchange="previewTestImage(this)">
-        <button class="btn btn-ghost" onclick="document.getElementById('testImage').click()" title="上传图片测试" id="btnTestImage" style="padding:0 8px;font-size:16px;">🖼️</button>
-        <button class="btn btn-primary" onclick="testPool()">发送</button>
-      </div>
-      <div id="testResult" style="margin-top:10px;"></div>
-    </div>
+
   </div>
 </div>
 
@@ -1854,8 +1853,40 @@ function clearTestImage() {
   if (btn) { btn.style.background = 'transparent'; btn.title = '上传图片测试'; }
 }
 
-async function testEndpoint(id){const m=document.getElementById('testMsg').value||'你好';toast('测试中...','info');const r=await api('POST','/api/test',{id:id,message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[模型: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||JSON.stringify(r.errors));}refresh();}
-async function testPool(){const m=document.getElementById('testMsg').value||'你好';toast('测试聚合池...','info');const r=await api('POST','/api/test-pool',{message:m,image:testImageBase64});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
+function openTestDrawer(targetId, targetName) {
+  document.getElementById('testTargetId').value = targetId;
+  if(targetId === 'pool') {
+    document.getElementById('testDrawerTitle').innerHTML = '🧪 测试智能聚合调度 (Pool)';
+  } else {
+    document.getElementById('testDrawerTitle').innerHTML = `🧪 测试: ${targetName}`;
+  }
+  document.getElementById('testResult').style.display = 'none';
+  document.getElementById('testDrawer').classList.add('show');
+}
+function closeTestDrawer() {
+  document.getElementById('testDrawer').classList.remove('show');
+}
+async function sendTest() {
+  const targetId = document.getElementById('testTargetId').value;
+  const m = document.getElementById('testMsg').value || '你好';
+  toast('发送测试中...','info');
+  let r;
+  if(targetId === 'pool'){
+    r = await api('POST','/api/test-pool',{message:m,image:testImageBase64});
+  } else {
+    r = await api('POST','/api/test',{id:targetId,message:m,image:testImageBase64});
+  }
+  const el = document.getElementById('testResult');
+  el.style.display = 'block';
+  if(r.ok){
+    el.className='test-result success';
+    el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');
+  }else{
+    el.className='test-result failure';
+    el.textContent='❌ '+(r.error||r.errors?.join('\n'));
+  }
+  refresh();
+});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
 function checkFetchBtn(){
@@ -2487,7 +2518,25 @@ async function clearTokenStats() {
 }
 
 </script>
+
+<div id="testDrawer">
+  <div class="drawer-header">
+    <span id="testDrawerTitle">🧪 测试</span>
+    <button class="btn btn-ghost btn-sm" onclick="closeTestDrawer()" style="padding: 2px 6px;">✖</button>
+  </div>
+  <div class="drawer-body">
+    <input type="hidden" id="testTargetId" value="">
+    <div id="testResult" class="test-result" style="margin-top:0; max-height:200px; display:none;"></div>
+    <div class="test-input-row" style="display:flex; gap:8px;">
+      <input type="text" id="testMsg" placeholder="测试消息..." value="用一句话介绍自己" style="flex:1">
+      <input type="file" id="testImage" accept="image/*" style="display:none;" onchange="previewTestImage(this)">
+      <button class="btn btn-ghost" onclick="document.getElementById('testImage').click()" title="上传图片测试" id="btnTestImage" style="padding:0 8px;font-size:16px;">🖼️</button>
+      <button class="btn btn-primary" onclick="sendTest()">发送</button>
+    </div>
+  </div>
+</div>
 </body>
+
 </html>"""
 
 
