@@ -1791,7 +1791,7 @@ function renderEndpoints(eps){
       <div class="ep-header">
         <div class="ep-name">${esc(ep.name)} ${b}</div>
         <div class="ep-actions">
-          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="testEndpoint('${ep.id}')">🧪</button>
+          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="openTestDrawer('${ep.id}', '${esc(ep.name)}')">🧪</button>
           ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${ep.id}')">⏰</button>`:''}
           <button class="btn btn-ghost btn-sm" title="${ep.enabled?'禁用端点':'启用端点'}" onclick="toggleEndpoint('${ep.id}')">${ep.enabled?'⏸':'▶'}</button>
           <button class="btn btn-ghost btn-sm" title="编辑端点" onclick="editEndpoint('${ep.id}')">✏️</button>
