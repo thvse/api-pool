@@ -593,11 +593,11 @@ class APIPool:
         
         description = ""
         for v_ep in vision_eps:
-            sys_log(f"启动视觉转译 -> 尝试端点 {v_ep.name}", "INFO")
+            sys_log(f"启动视觉转译 -> 尝试端点 {v_ep.name} ({v_ep.model})", "INFO")
             payload = {"model": v_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
             result, error = self._try_endpoint(v_ep, payload, timeout=60, log_usage=False, force_no_retry=True)
             if error:
-                sys_log(f"视觉转译失败 ({v_ep.name}): {error}", "WARNING")
+                sys_log(f"视觉转译失败 ({v_ep.name} - {v_ep.model}): {error}", "WARNING")
                 continue
                 
             description = result if isinstance(result, str) else result.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -1791,7 +1791,7 @@ function renderEndpoints(eps){
       <div class="ep-header">
         <div class="ep-name">${esc(ep.name)} ${b}</div>
         <div class="ep-actions">
-          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="openTestDrawer('${ep.id}', '${esc(ep.name)}')">🧪</button>
+          <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="openTestDrawer('${ep.id}', '${esc(ep.name)} (${esc(ep.model)})')">🧪</button>
           ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${ep.id}')">⏰</button>`:''}
           <button class="btn btn-ghost btn-sm" title="${ep.enabled?'禁用端点':'启用端点'}" onclick="toggleEndpoint('${ep.id}')">${ep.enabled?'⏸':'▶'}</button>
           <button class="btn btn-ghost btn-sm" title="编辑端点" onclick="editEndpoint('${ep.id}')">✏️</button>
