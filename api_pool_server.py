@@ -1253,7 +1253,12 @@ def api_handler(method, path, body):
             if ep["id"] == ep_id: target_ep = ep; break
         if not target_ep: return 404, {"error": "端点不存在"}, False
         test_pool = APIPool(default_payload={"temperature": 0.7})
-        test_pool.add_endpoint({"name": target_ep["name"], "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai")})
+        test_pool.add_endpoint({"name": target_ep["name"], "base_url": target_ep["base_url"], "api_key": target_ep["api_key_full"], "model": target_ep["model"], "priority": 1, "timeout": target_ep["timeout"], "max_retries": target_ep["max_retries"], "enabled": True, "use_proxy": target_ep.get("use_proxy", True), "protocol": target_ep.get("protocol", "openai"), "is_vision": target_ep.get("is_vision", True)})
+        
+        img = body.get("image")
+        if img:
+            test_msg = [{"type": "text", "text": test_msg}, {"type": "image_url", "image_url": {"url": img}}]
+            
         try:
             res_dict, served_ep = test_pool.chat([{"role": "user", "content": test_msg}], return_endpoint=True)
             res_str = res_dict.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(res_dict, dict) else res_dict
