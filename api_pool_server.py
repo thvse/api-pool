@@ -2152,8 +2152,8 @@ async function loadAnalytics(){
         <div class="dash-stat"><div class="stat-icon">📈</div><div class="num" style="color:var(--accent-light)">${fmtNum(r.last_30_days)}</div><div class="label">近 30 天</div></div>
         <div class="dash-stat"><div class="stat-icon">🔥</div><div class="num" style="color:var(--orange)">${fmtNum(r.today_calls)}</div><div class="label">今日请求次数</div></div>
         <div class="dash-stat"><div class="stat-icon">🌍</div><div class="num" style="color:var(--orange)">${fmtNum(r.month_calls)}</div><div class="label">本月请求次数</div></div>
-        <div class="dash-stat"><div class="stat-icon">💾</div><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label">今日缓存命中</div></div>
-        <div class="dash-stat"><div class="stat-icon">🧠</div><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label">本月缓存命中</div></div>
+        <div class="dash-stat"><div class="stat-icon">💾</div><div class="num" style="color:var(--purple)">${r.today_cache_hit_rate}%</div><div class="label" style="display:flex; flex-direction:column;">今日缓存命中<span style="font-size:10px; color:var(--text-dim); margin-top:2px;">命中: ${fmtNum(r.today_cached)} / 未命: ${fmtNum(r.today_missed)}</span></div></div>
+        <div class="dash-stat"><div class="stat-icon">🧠</div><div class="num" style="color:var(--purple)">${r.month_cache_hit_rate}%</div><div class="label" style="display:flex; flex-direction:column;">本月缓存命中<span style="font-size:10px; color:var(--text-dim); margin-top:2px;">命中: ${fmtNum(r.month_cached)} / 未命: ${fmtNum(r.month_missed)}</span></div></div>
     `;
     
     setTimeout(() => {
