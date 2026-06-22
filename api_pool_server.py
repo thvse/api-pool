@@ -1647,10 +1647,9 @@ select option { background: var(--bg); color: var(--text); }
       <div class="form-group"><label>重试次数</label><input type="number" id="fRetries" value="0" min="0"></div>
       <div class="form-group"><label>冷却 (分钟)</label><input type="number" id="fCooldown" value="5" min="0"></div>
     </div>
-      <div class="form-group" style="margin-top: 5px;">
-        <label style="cursor:pointer; display:flex; align-items:center; gap:5px; font-size:13px;">
-          <input type="checkbox" id="fVision" checked> 👁️ 支持视觉输入 (Vision Support)
-        </label>
+      <div class="form-group">
+        <label title="标识该模型是否原生支持读图。若选“不支持”，收到图片时会自动触发视觉转译。">多模态 (视觉) 能力</label>
+        <select id="fVision"><option value="true">👁️ 原生支持</option><option value="false">🚫 不支持 (触发自动转译)</option></select>
       </div>
     <div class="form-row">
       <div class="form-group"><label>启用</label><select id="fEnabled"><option value="true">是</option><option value="false">否</option></select></div>
@@ -1954,7 +1953,7 @@ async function testSelectedVision(){
 function openAddModal(){
     document.getElementById('editName').value='';document.getElementById('modalTitle').textContent='添加端点';
     ['fName','fUrl','fKey','fModel'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=60;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';document.getElementById('fHealthMode').value='chat';document.getElementById('fVision').checked=true;
+    document.getElementById('fPriority').value=1;document.getElementById('fTimeout').value=60;document.getElementById('fRetries').value=0;document.getElementById('fCooldown').value=5;document.getElementById('fEnabled').value='true';document.getElementById('fDailyLimit').value=0;document.getElementById('fRpmLimit').value=0;document.getElementById('fProxy').value='true';document.getElementById('fProtocol').value='openai';document.getElementById('fHealthMode').value='chat';document.getElementById('fVision').value='true';
     document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';
     document.getElementById('fetchModelsBtn').disabled=true;document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
     allModels=[];selectedModels=new Set();latencyResults={};visionResults={};
@@ -1964,7 +1963,7 @@ function editEndpoint(id){
     api('GET','/api/endpoints').then(eps=>{const ep=eps.find(e=>e.id===id);if(!ep)return;
         document.getElementById('editName').value=id;document.getElementById('modalTitle').textContent='编辑端点';
         document.getElementById('fName').value=ep.name;document.getElementById('fUrl').value=ep.base_url;document.getElementById('fKey').value=ep.api_key_full||'';document.getElementById('fModel').value=ep.model;
-        document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';document.getElementById('fHealthMode').value=ep.health_mode||'chat';document.getElementById('fVision').checked=ep.is_vision!==false;
+        document.getElementById('fPriority').value=ep.priority;document.getElementById('fTimeout').value=ep.timeout;document.getElementById('fRetries').value=ep.max_retries;document.getElementById('fCooldown').value=ep.cooldown_minutes;document.getElementById('fEnabled').value=String(ep.enabled);document.getElementById('fDailyLimit').value=ep.daily_limit||0;document.getElementById('fRpmLimit').value=ep.rpm_limit||0;document.getElementById('fProxy').value=String(ep.use_proxy!==false);document.getElementById('fProtocol').value=ep.protocol||'openai';document.getElementById('fHealthMode').value=ep.health_mode||'chat';document.getElementById('fVision').value=String(ep.is_vision!==false);
         document.getElementById('modelBrowser').style.display='none';document.getElementById('batchBar').style.display='none';document.getElementById('batchAddBtn').style.display='none';document.getElementById('singleAddBtn').style.display='inline-flex';
         allModels=[];selectedModels=new Set();latencyResults={};visionResults={};checkFetchBtn();document.getElementById('modal').classList.add('show');
     });
@@ -1973,7 +1972,7 @@ function closeModal(){document.getElementById('modal').classList.remove('show');
 
 async function saveEndpoint(){
     const ep_id=document.getElementById('editName').value;
-    const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||60,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai',health_mode:document.getElementById('fHealthMode').value||'chat',is_vision:document.getElementById('fVision').checked};
+    const d={name:document.getElementById('fName').value.trim(),base_url:document.getElementById('fUrl').value.trim(),api_key:document.getElementById('fKey').value.trim(),model:document.getElementById('fModel').value.trim(),priority:parseInt(document.getElementById('fPriority').value)||1,timeout:parseInt(document.getElementById('fTimeout').value)||60,max_retries:parseInt(document.getElementById('fRetries').value)||0,cooldown_minutes:parseInt(document.getElementById('fCooldown').value)||0,enabled:document.getElementById('fEnabled').value==='true',daily_limit:parseInt(document.getElementById('fDailyLimit').value)||0,rpm_limit:parseInt(document.getElementById('fRpmLimit').value)||0,use_proxy:document.getElementById('fProxy').value==='true',protocol:document.getElementById('fProtocol').value||'openai',health_mode:document.getElementById('fHealthMode').value||'chat',is_vision:document.getElementById('fVision').value==='true'};
     if(!d.name||!d.base_url||!d.api_key){toast('填写名称/URL/Key','error');return;}
     if(!d.model){toast('选择模型','error');return;}
     if(ep_id){await api('PUT',`/api/endpoints/${encodeURIComponent(ep_id)}`,d);toast('已更新','success');}
