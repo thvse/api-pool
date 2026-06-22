@@ -1206,7 +1206,8 @@ def api_handler(method, path, body):
                 "use_proxy": item.get("use_proxy", base.get("use_proxy", True)),
                 "protocol": item.get("protocol", base.get("protocol", "openai")),
                 "health_mode": item.get("health_mode", base.get("health_mode", "chat")),
-                "enabled": item.get("enabled", True),
+                  "is_vision": item.get("is_vision", base.get("is_vision", True)),
+                  "enabled": item.get("enabled", True),
             }
             if ep["model"]: pool.add_endpoint(ep); added += 1
         _sync_to_config(); return 201, {"ok": True, "added": added}, False
@@ -1998,7 +1999,7 @@ async function batchAddEndpoints(){
     if(!u||!k){toast('填写 URL 和 Key','error');return;}
     if(!selectedModels.size){toast('选择模型','error');return;}
     const ms=[...selectedModels];toast(`添加 ${ms.length} 个...`,'info');
-    const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?fn:m,model:m,priority:sp+i})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,protocol:pt,start_priority:sp,health_mode:hm}});
+    const r=await api('POST','/api/endpoints/batch',{endpoints:ms.map((m,i)=>({name:fn?fn:m,model:m,priority:sp+i,is_vision:visionResults[m]?visionResults[m].supports_vision:true})),base:{base_url:u,api_key:k,timeout:to,max_retries:re,cooldown_minutes:cd,daily_limit:dl,rpm_limit:rl,use_proxy:up,protocol:pt,start_priority:sp,health_mode:hm}});
     if(r.ok){toast(`✅ ${r.added} 个`,'success');closeModal();refresh();}else toast('失败','error');
 }
 
