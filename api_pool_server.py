@@ -1252,7 +1252,11 @@ def api_handler(method, path, body):
         try: return 200, {"ok": True, "result": test_pool.chat([{"role": "user", "content": test_msg}])}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/test-pool":
-        try: return 200, {"ok": True, "result": pool.chat([{"role": "user", "content": body.get("message", "你好")}])}, False
+        test_msg = body.get("message", "你好")
+        img = body.get("image")
+        if img:
+            test_msg = [{"type": "text", "text": test_msg}, {"type": "image_url", "image_url": {"url": img}}]
+        try: return 200, {"ok": True, "result": pool.chat([{"role": "user", "content": test_msg}])}, False
         except AllEndpointsFailed as e: return 200, {"ok": False, "errors": e.errors}, False
         except Exception as e: return 200, {"ok": False, "error": str(e)}, False
     if method == "POST" and cp == "/api/reset": pool.reset(); return 200, {"ok": True}, False
@@ -1518,11 +1522,13 @@ select option { background: var(--bg); color: var(--text); }
     </div>
     <div class="card">
       <div class="card-title"><span class="icon">🧪</span> 测试</div>
-      <div class="test-input-row">
-        <input type="text" id="testMsg" placeholder="测试消息..." value="用一句话介绍自己">
+      <div class="test-input-row" style="display:flex; gap:8px;">
+        <input type="text" id="testMsg" placeholder="测试消息..." value="用一句话介绍自己" style="flex:1">
+        <input type="file" id="testImage" accept="image/*" style="display:none;" onchange="previewTestImage(this)">
+        <button class="btn btn-ghost" onclick="document.getElementById('testImage').click()" title="上传图片测试" id="btnTestImage" style="padding:0 8px;font-size:16px;">🖼️</button>
         <button class="btn btn-primary" onclick="testPool()">发送</button>
       </div>
-      <div id="testResult"></div>
+      <div id="testResult" style="margin-top:10px;"></div>
     </div>
   </div>
 </div>
