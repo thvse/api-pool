@@ -1789,7 +1789,7 @@ function renderEndpoints(eps){
     const last=ep.last_success?timeAgo(ep.last_success):'—';
     return`<div class="${cls}">
       <div class="ep-header">
-        <div class="ep-name">${esc(ep.name)} ${b}</div>
+        <div class="ep-name"><span style="word-break: break-all;">${esc(ep.name)}</span> ${b}</div>
         <div class="ep-actions">
           <button class="btn btn-ghost btn-sm" title="连通性测试" onclick="openTestDrawer('${ep.id}', '${esc(ep.name)} (${esc(ep.model)})')">🧪</button>
           ${ep.in_cooldown?`<button class="btn btn-yellow btn-sm" title="立刻解除冷却" onclick="clearCooldown('${ep.id}')">⏰</button>`:''}
