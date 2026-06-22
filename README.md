@@ -51,9 +51,6 @@ git clone https://github.com/thvse/api-pool.git
 cd api-pool
 ```
 
-> **提示:** 如果你在中国大陆地区克隆速度慢或推送失败，推荐在终端配置 Git 代理，例如：
-> `git config --global http.proxy http://127.0.0.1:10809` (请替换为你的代理端口)
-
 ### 2. 启动服务
 无需安装任何三方库，直接运行：
 ```bash
