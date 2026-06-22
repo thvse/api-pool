@@ -1886,7 +1886,7 @@ async function sendTest() {
     el.textContent='❌ '+(r.error||r.errors?.join('\n'));
   }
   refresh();
-});const el=document.getElementById('testResult');if(r.ok){el.className='test-result success';el.textContent='✅ '+r.result+(r.served_by?'\n[响应: '+r.served_by+']':'');}else{el.className='test-result failure';el.textContent='❌ '+(r.error||r.errors?.join('\n'));}refresh();}
+}
 async function resetPool(){await api('POST','/api/reset');toast('已重置','success');refresh();}
 
 function checkFetchBtn(){
