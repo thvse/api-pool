@@ -261,7 +261,7 @@ class ChatLogger:
                     conn.commit()
                     conn.close()
                 except Exception as e:
-                    sys_log(f"记录聊天明细失败: {e}", "ERROR")
+                    sys_log(f"记录对话日志失败: {e}", "ERROR")
         threading.Thread(target=_write, daemon=True).start()
 
     def get_logs(self, limit=50, offset=0):
@@ -593,11 +593,11 @@ class APIPool:
         
         description = ""
         for v_ep in vision_eps:
-            sys_log(f"启动视觉转译 -> 尝试端点 {v_ep.name} ({v_ep.model})", "INFO")
+            sys_log(f"启动图片解析 -> 尝试端点 {v_ep.name} ({v_ep.model})", "INFO")
             payload = {"model": v_ep.model, "messages": translation_msgs, "stream": False, "max_tokens": 4096}
             result, error = self._try_endpoint(v_ep, payload, timeout=60, log_usage=True, force_no_retry=True)
             if error:
-                sys_log(f"视觉转译失败 ({v_ep.name} - {v_ep.model}): {error}", "WARNING")
+                sys_log(f"图片解析失败 ({v_ep.name} - {v_ep.model}): {error}", "WARNING")
                 continue
                 
             description = result if isinstance(result, str) else result.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -605,7 +605,7 @@ class APIPool:
                 break
                 
         if not description:
-            sys_log("所有视觉转译端点均失败", "ERROR")
+            sys_log("所有图片解析端点均失败", "ERROR")
             return messages
         
         import copy
@@ -620,9 +620,9 @@ class APIPool:
                     else:
                         has_image = True
                 if has_image:
-                    filtered_content.append({"type": "text", "text": f"\n\n[视觉转译内容]: {description}"})
+                    filtered_content.append({"type": "text", "text": f"\n\n[图片解析内容]: {description}"})
                 m["content"] = filtered_content
-        sys_log("视觉转译完成", "INFO")
+        sys_log("图片解析完成", "INFO")
         return new_msgs
 
     def check_all_health(self):
@@ -752,9 +752,9 @@ class APIPool:
                     if payload.get("stream"):
                         def vision_wrapper(tgt_ep, pld, t_out, a_eps):
                             import json
-                            yield f"data: {{'choices':[{{'delta':{{'content':'[API Pool: 检测到图片，当前目标不支持视觉，正在按优先级链调度多模态模型进行转译...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[API Pool: 检测到图片，当前目标不支持视觉，正在调用视觉模型进行解析...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
                             translated_msgs = self._translate_images_sync(pld["messages"], a_eps)
-                            yield f"data: {{'choices':[{{'delta':{{'content':'[视觉转译流程结束，交由当前模型深度思考...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
+                            yield f"data: {{'choices':[{{'delta':{{'content':'[图片解析完成，交由目标模型继续处理...]\\n\\n'}}}}]}}\n\n".replace("'", '"')
                             pld["messages"] = translated_msgs
                             gen, err = self._try_endpoint(tgt_ep, pld, t_out)
                             if err:
@@ -1501,7 +1501,7 @@ select option { background: var(--bg); color: var(--text); }
       <h1><span class="logo">⚡</span> API Pool</h1>
       <div class="tabs">
           <div class="tab active" id="tabPool" onclick="switchTab('pool')">🔌 聚合池</div>
-          <div class="tab" id="tabAnalytics" onclick="switchTab('analytics')">📊 数据大盘</div>
+          <div class="tab" id="tabAnalytics" onclick="switchTab('analytics')">📊 数据面板</div>
       </div>
   </div>
   <div class="header-actions" id="poolActions">
@@ -1512,9 +1512,9 @@ select option { background: var(--bg); color: var(--text); }
   </div>
   <div class="header-actions" id="analyticsActions" style="display:none;">
     <select id="analyticsFilter" class="btn btn-ghost" style="appearance:none; cursor:pointer; background:rgba(255,255,255,0.05);" onchange="loadAnalytics()">
-        <option value="all">全端点大盘</option>
+        <option value="all">全端点统计</option>
     </select>
-    <button class="btn btn-ghost" onclick="clearTokenStats()" style="color:var(--red);">🗑 清空大盘</button>
+    <button class="btn btn-ghost" onclick="clearTokenStats()" style="color:var(--red);">🗑 清空统计</button>
     <button class="btn btn-green" onclick="exportCSV()">📥 导出流水</button>
   </div>
 </div>
@@ -1558,7 +1558,7 @@ select option { background: var(--bg); color: var(--text); }
 
 <div class="log-card" style="margin-top:20px; display:flex; flex-direction:column; padding-bottom:15px;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-      <div class="card-title" style="margin-bottom:0;"><span class="icon">💬</span> 聊天明细 (Audit Logs)</div>
+      <div class="card-title" style="margin-bottom:0;"><span class="icon">💬</span> 对话日志 (Audit Logs)</div>
       <button class="btn btn-ghost btn-sm" onclick="clearChatLogs()" style="color:var(--red); padding:2px 8px;">🗑 清空记录</button>
     </div>
     <div style="display:flex; gap:15px; height:450px; min-height:300px;">
@@ -1683,7 +1683,7 @@ select option { background: var(--bg); color: var(--text); }
       <div class="form-group"><label>冷却 (分钟)</label><input type="number" id="fCooldown" value="5" min="0"></div>
     </div>
       <div class="form-group">
-        <label title="标识该模型是否原生支持读图。若选“不支持”，收到图片时会自动触发视觉转译。">多模态 (视觉) 能力</label>
+        <label title="标识该模型是否原生支持读图。若选“不支持”，收到图片时会自动触发图片解析。">多模态 (视觉) 能力</label>
         <select id="fVision"><option value="true">👁️ 原生支持</option><option value="false">🚫 不支持 (触发自动转译)</option></select>
       </div>
     <div class="form-row">
@@ -1856,7 +1856,7 @@ function clearTestImage() {
 function openTestDrawer(targetId, targetName) {
   document.getElementById('testTargetId').value = targetId;
   if(targetId === 'pool') {
-    document.getElementById('testDrawerTitle').innerHTML = '🧪 测试智能聚合调度 (Pool)';
+    document.getElementById('testDrawerTitle').innerHTML = '🧪 测试端点池 (Pool)';
   } else {
     document.getElementById('testDrawerTitle').innerHTML = `🧪 测试: ${targetName}`;
   }
@@ -2309,7 +2309,7 @@ async function loadAnalytics(){
     
     const sel = document.getElementById('analyticsFilter');
     if (sel.options.length <= 1) {
-        let opts = '<option value="all">全端点大盘</option>';
+        let opts = '<option value="all">全端点统计</option>';
         r.all_endpoints_list.forEach(e => { opts += `<option value="${esc(e)}">${esc(e)}</option>`; });
         sel.innerHTML = opts;
         sel.value = epFilter;
@@ -2490,7 +2490,7 @@ function viewChatLog(idx) {
   document.getElementById('clMeta').innerHTML = `<span style="color:var(--green)">${log.total_tokens} Tokens</span> <span style="margin-left:10px;color:var(--yellow)">${log.latency_ms}ms</span>`;
 }
 async function clearChatLogs() {
-  if (!confirm('确定要清空所有聊天明细记录吗？此操作不可逆。')) return;
+  if (!confirm('确定要清空所有对话日志记录吗？此操作不可逆。')) return;
   await api('DELETE', '/api/chat-logs');
   toast('已清空', 'success');
   loadChatLogs(0);
@@ -2511,9 +2511,9 @@ async function clearSysLogs() {
 }
 
 async function clearTokenStats() {
-  if (!confirm('确定要清空所有数据大盘的 Token 统计记录吗？此操作不可逆。')) return;
+  if (!confirm('确定要清空所有数据面板的 Token 统计记录吗？此操作不可逆。')) return;
   await api('DELETE', '/api/token-stats');
-  toast('大盘数据已清空', 'success');
+  toast('统计数据已清空', 'success');
   loadAnalytics();
 }
 
