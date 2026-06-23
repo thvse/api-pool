@@ -12,9 +12,9 @@
 - **控制台主页 (Dashboard):**
   ![Dashboard](./assets/dashboard.png)
 - **统计大盘 (Analytics):**
-  ![Analytics](./assets/analytics.jpeg)
+  ![Analytics](./assets/analytics.png)
 - **对话日志 (Audit Logs):**
-  ![Audit Logs](./assets/chat_logs.jpeg)
+  ![Audit Logs](./assets/chat_logs.png)
 - **系统日志 (System Logs):**
   ![System Logs](./assets/sys_logs.png)
 - **端点配置 (Endpoint Config):**
