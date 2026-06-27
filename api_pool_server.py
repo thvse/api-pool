@@ -864,6 +864,7 @@ class APIPool:
                     
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             if is_anthropic:
                 safe_api_key = ep.api_key.encode('ascii', 'ignore').decode('ascii').strip()
                 req.add_header("x-api-key", safe_api_key)
@@ -1029,6 +1030,7 @@ class APIPool:
     def fetch_models(self, base_url, api_key, timeout=10, use_proxy=True, protocol="openai"):
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, method="GET")
+        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         safe_api_key = api_key.encode('ascii', 'ignore').decode('ascii').strip()
         
         if protocol == "anthropic":
